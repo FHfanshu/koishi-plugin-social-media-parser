@@ -1,0 +1,56 @@
+import type { Context } from 'koishi'
+
+import { Config } from './config'
+import type { Config as PluginConfig } from './config'
+import { registerParseCommand } from './command'
+import { registerAutoParseMiddleware } from './middleware'
+import { registerParseUrlTool } from './tools/parse-url-tool'
+
+export const name = 'social-media-parser'
+
+export const inject = {
+  required: ['http'],
+  optional: ['puppeteer', 'chatluna', 'chatluna_character'],
+} as const
+
+export const usage = `
+## Social Media Parser
+
+抖音 + 小红书二合一解析插件，支持：
+- 自动解析（guild 白名单）
+- 手动命令：\`parse <url>\`
+- ChatLuna 工具：\`parse_social_media\`
+
+### 自动解析与上下文注入
+
+- 自动解析受 \`autoParse.guilds\` / \`autoParse.users\` 白名单限制。
+- 自动解析命中后会发送媒体到群聊，并可静默注入 ChatLuna 上下文。
+- 默认不主动触发角色回复（仅作为后续对话上下文）。
+
+### 视频处理策略
+
+- 短视频（<= videoMaxDurationSec）压缩后注入。
+- 长视频（> videoMaxDurationSec）按间隔抽帧注入，并可保留音频。
+`
+
+export function apply(ctx: Context, config: PluginConfig): void {
+  const logger = ctx.logger('social-media-parser')
+
+  if (!config || typeof config !== 'object') {
+    logger.error('插件配置为空或无效，已跳过加载。')
+    return
+  }
+
+  const cooldownMap = new Map<string, number>()
+
+  registerParseCommand(ctx, config)
+  registerAutoParseMiddleware(ctx, config, cooldownMap)
+
+  ctx.inject(['chatluna'], (innerCtx) => {
+    registerParseUrlTool(innerCtx as any, config)
+  })
+
+  logger.info('social-media-parser 插件已加载')
+}
+
+export { Config }
