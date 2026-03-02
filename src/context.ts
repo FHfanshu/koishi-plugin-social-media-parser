@@ -3,7 +3,7 @@ import type { Context, Logger, Session } from 'koishi'
 
 import type { MediaInjectConfig } from './config'
 import type { ParsedContent } from './types'
-import { processVideoForContext, compressImageForContext } from './utils/compress'
+import { processVideoForContext, probeVideoDuration, compressImageForContext } from './utils/compress'
 import { downloadBuffer } from './utils/http'
 import { toMediaUrl } from './utils/storage'
 
@@ -11,6 +11,8 @@ export interface InjectContextOptions {
   contextMaxChars: number
   injectMedia: boolean
   mediaInject: MediaInjectConfig
+  maxVideoDurationSec?: number
+  maxVideoDownloadBytes?: number
 }
 
 export async function injectParsedContext(
@@ -50,7 +52,14 @@ export async function injectParsedContext(
     return
   }
 
-  const mediaMessage = await buildMediaInjectionMessage(ctx, parsed, options.mediaInject, logger)
+  const mediaMessage = await buildMediaInjectionMessage(
+    ctx,
+    parsed,
+    options.mediaInject,
+    options.maxVideoDurationSec ?? 0,
+    options.maxVideoDownloadBytes ?? 0,
+    logger
+  )
   if (!mediaMessage) {
     return
   }
@@ -68,6 +77,8 @@ async function buildMediaInjectionMessage(
   ctx: Context,
   parsed: ParsedContent,
   mediaConfig: MediaInjectConfig,
+  maxVideoDurationSec: number,
+  maxVideoDownloadBytes: number,
   logger: Logger
 ): Promise<HumanMessage | null> {
   const parts: any[] = [{ type: 'text', text: `以下是 ${parsed.platform} 链接解析到的媒体内容。` }]
@@ -81,7 +92,9 @@ async function buildMediaInjectionMessage(
 
   for (const imageUrl of parsed.images.slice(0, mediaConfig.maxImages)) {
     try {
-      const downloaded = await downloadBuffer(ctx, imageUrl, 20_000)
+      const downloaded = await downloadBuffer(ctx, imageUrl, 20_000, {
+        maxBytes: mediaConfig.maxTotalBytes,
+      })
       const compressed = await compressImageForContext(downloaded.buffer, downloaded.mimeType, mediaConfig, logger)
       if (!compressed) {
         skipReasons.push('image compression returned empty')
@@ -117,65 +130,93 @@ async function buildMediaInjectionMessage(
         ctx,
         videoUrl,
         90_000,
-        referer ? { referer } : undefined
+        {
+          headers: referer ? { referer } : undefined,
+          maxBytes: Math.max(mediaConfig.maxTotalBytes, maxVideoDownloadBytes || mediaConfig.maxTotalBytes),
+        }
       )
-      const processed = await processVideoForContext(downloaded.buffer, downloaded.mimeType, mediaConfig, logger)
-      if (processed) {
-        if (processed.mode === 'short-video' && processed.video) {
-          if (canAppendBinary(processed.video.buffer.length, totalBytes, mediaConfig.maxTotalBytes)) {
-            totalBytes += processed.video.buffer.length
-            injectedVideo = true
-            const videoMediaUrl = await toMediaUrl(ctx, processed.video.mimeType, processed.video.buffer, 'video', logger)
-            parts.push({
-              type: 'video_url',
-              video_url: {
-                url: videoMediaUrl,
-                mimeType: processed.video.mimeType,
-              },
-            })
-          } else {
-            skipReasons.push('short video exceeds maxTotalBytes budget')
-            videoSkipReason = 'short video exceeds maxTotalBytes budget'
-          }
-        } else {
-          for (const frame of processed.frames) {
-            if (!canAppendBinary(frame.buffer.length, totalBytes, mediaConfig.maxTotalBytes)) {
-              skipReasons.push('video frames exceed maxTotalBytes budget')
-              videoSkipReason = 'video frames exceed maxTotalBytes budget'
-              break
-            }
-            totalBytes += frame.buffer.length
-            injectedFrameCount += 1
-            const frameUrl = await toMediaUrl(ctx, frame.mimeType, frame.buffer, `frame${injectedFrameCount}`, logger)
-            parts.push({
-              type: 'image_url',
-              image_url: {
-                url: frameUrl,
-              },
-            })
-          }
 
-          if (mediaConfig.keepAudio && processed.audio) {
-            if (canAppendBinary(processed.audio.buffer.length, totalBytes, mediaConfig.maxTotalBytes)) {
-              totalBytes += processed.audio.buffer.length
-              injectedAudio = true
-              const audioUrl = await toMediaUrl(ctx, processed.audio.mimeType, processed.audio.buffer, 'audio', logger)
+      let shouldProcessVideo = true
+
+      // Duration guard: skip video injection if over the global limit
+      if (maxVideoDurationSec && maxVideoDurationSec > 0) {
+        const durationSec = await probeVideoDuration(downloaded.buffer, downloaded.mimeType, mediaConfig.ffmpegTimeoutMs)
+        if (durationSec == null) {
+          shouldProcessVideo = false
+          skipReasons.push('video duration probe failed')
+          videoSkipReason = 'video duration probe failed'
+          logger.warn(`context video inject skipped: duration probe failed, source=${videoUrl}`)
+        } else if (durationSec > maxVideoDurationSec) {
+          shouldProcessVideo = false
+          const limitMin = Math.round(maxVideoDurationSec / 60)
+          const actualMin = Math.round(durationSec / 60)
+          logger.info(
+            `context video inject skipped: duration ${actualMin}min exceeds limit ${limitMin}min, source=${videoUrl}`
+          )
+          skipReasons.push(`video duration ${actualMin}min exceeds limit ${limitMin}min`)
+          videoSkipReason = `video duration ${actualMin}min exceeds limit ${limitMin}min`
+        }
+      }
+
+      if (shouldProcessVideo) {
+        const processed = await processVideoForContext(downloaded.buffer, downloaded.mimeType, mediaConfig, logger)
+        if (processed) {
+          if (processed.mode === 'short-video' && processed.video) {
+            if (canAppendBinary(processed.video.buffer.length, totalBytes, mediaConfig.maxTotalBytes)) {
+              totalBytes += processed.video.buffer.length
+              injectedVideo = true
+              const videoMediaUrl = await toMediaUrl(ctx, processed.video.mimeType, processed.video.buffer, 'video', logger)
               parts.push({
-                type: 'audio_url',
-                audio_url: {
-                  url: audioUrl,
-                  mimeType: processed.audio.mimeType,
+                type: 'video_url',
+                video_url: {
+                  url: videoMediaUrl,
+                  mimeType: processed.video.mimeType,
                 },
               })
             } else {
-              skipReasons.push('audio exceeds maxTotalBytes budget')
-              videoSkipReason = 'audio exceeds maxTotalBytes budget'
+              skipReasons.push('short video exceeds maxTotalBytes budget')
+              videoSkipReason = 'short video exceeds maxTotalBytes budget'
+            }
+          } else {
+            for (const frame of processed.frames) {
+              if (!canAppendBinary(frame.buffer.length, totalBytes, mediaConfig.maxTotalBytes)) {
+                skipReasons.push('video frames exceed maxTotalBytes budget')
+                videoSkipReason = 'video frames exceed maxTotalBytes budget'
+                break
+              }
+              totalBytes += frame.buffer.length
+              injectedFrameCount += 1
+              const frameUrl = await toMediaUrl(ctx, frame.mimeType, frame.buffer, `frame${injectedFrameCount}`, logger)
+              parts.push({
+                type: 'image_url',
+                image_url: {
+                  url: frameUrl,
+                },
+              })
+            }
+
+            if (mediaConfig.keepAudio && processed.audio) {
+              if (canAppendBinary(processed.audio.buffer.length, totalBytes, mediaConfig.maxTotalBytes)) {
+                totalBytes += processed.audio.buffer.length
+                injectedAudio = true
+                const audioUrl = await toMediaUrl(ctx, processed.audio.mimeType, processed.audio.buffer, 'audio', logger)
+                parts.push({
+                  type: 'audio_url',
+                  audio_url: {
+                    url: audioUrl,
+                    mimeType: processed.audio.mimeType,
+                  },
+                })
+              } else {
+                skipReasons.push('audio exceeds maxTotalBytes budget')
+                videoSkipReason = 'audio exceeds maxTotalBytes budget'
+              }
             }
           }
+        } else {
+          skipReasons.push('video processing returned empty')
+          videoSkipReason = 'video processing returned empty'
         }
-      } else {
-        skipReasons.push('video processing returned empty')
-        videoSkipReason = 'video processing returned empty'
       }
     } catch (error) {
       logger.debug(`inject video failed: ${String((error as Error)?.message || error)}`)

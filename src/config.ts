@@ -80,6 +80,8 @@ export interface Config {
   cooldownMs: number
   timeoutMs: number
   maxMediaBytes: number
+  maxVideoDownloadBytes: number
+  maxVideoDurationSec: number
   sendMode: SendMode
   fallbackToUrlOnError: boolean
   debug: boolean
@@ -116,6 +118,8 @@ export const Config: Schema<Config> = Schema.intersect([
     cooldownMs: Schema.number().default(8_000).description('同一链接冷却时间（毫秒）'),
     timeoutMs: Schema.number().default(15_000).description('网络请求超时（毫秒）'),
     maxMediaBytes: Schema.number().default(15 * 1024 * 1024).description('消息发送时单个媒体最大下载大小（bytes）'),
+    maxVideoDownloadBytes: Schema.number().default(512 * 1024 * 1024).min(8 * 1024 * 1024).max(2 * 1024 * 1024 * 1024).description('视频下载最大大小（bytes，用于时长探测与视频处理；建议大于 maxMediaBytes）'),
+    maxVideoDurationSec: Schema.number().default(1800).min(60).max(7200).description('视频最大时长（秒），超出则跳过解析。默认 1800 秒（30 分钟）'),
     sendMode: Schema.union([
       Schema.const('base64').description('下载后转 base64 发送（更稳定）'),
       Schema.const('url').description('直接发送 URL（更省流量）')

@@ -97,6 +97,11 @@ export async function processVideoForContext(
     await writeFile(inputPath, input)
 
     const durationSec = await readVideoDuration(ffprobe, inputPath, config.ffmpegTimeoutMs)
+    if (durationSec == null) {
+      logger.debug('video duration probe failed, skip video processing')
+      return null
+    }
+
     const isLongVideo = durationSec > config.videoMaxDurationSec
 
     if (!isLongVideo) {
@@ -286,7 +291,27 @@ async function extractVideoAudio(
   }
 }
 
-async function readVideoDuration(ffprobe: string, inputPath: string, timeoutMs: number): Promise<number> {
+/**
+ * Probe the duration of a video buffer in seconds.
+ * Returns null if ffprobe is not available or fails.
+ */
+export async function probeVideoDuration(input: Buffer, mimeType: string, timeoutMs: number): Promise<number | null> {
+  const ffprobe = await resolveFfprobeBinary()
+  if (!ffprobe) {
+    return null
+  }
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'social-media-probe-'))
+  const inputPath = path.join(tempDir, `input${extensionFromMime(mimeType)}`)
+  try {
+    await writeFile(inputPath, input)
+    return await readVideoDuration(ffprobe, inputPath, timeoutMs)
+  } finally {
+    await safeCleanup(tempDir)
+  }
+}
+
+async function readVideoDuration(ffprobe: string, inputPath: string, timeoutMs: number): Promise<number | null> {
   try {
     const output = await runCommand(
       ffprobe,
@@ -306,9 +331,9 @@ async function readVideoDuration(ffprobe: string, inputPath: string, timeoutMs: 
     if (Number.isFinite(duration) && duration > 0) {
       return duration
     }
-    return 0
+    return null
   } catch {
-    return 0
+    return null
   }
 }
 

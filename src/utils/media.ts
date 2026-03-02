@@ -3,9 +3,11 @@ import type { Context, Logger, Session } from 'koishi'
 
 import type { Config } from '../config'
 import type { ParsedContent } from '../types'
-import { processVideoForContext } from './compress'
+import { processVideoForContext, probeVideoDuration } from './compress'
 import { downloadBuffer } from './http'
+import type { DownloadedBuffer } from './http'
 import { toMediaUrl } from './storage'
+import { isSafePublicHttpUrl } from './url'
 
 export async function sendParsedContent(
   ctx: Context,
@@ -42,20 +44,22 @@ export async function sendParsedContent(
     const primaryVideo = parsed.videos[0]
     const videoElement = await buildVideoElement(ctx, primaryVideo, config, logger)
 
-    if (shouldAutoForward) {
-      const nodes = createForwardTextNodes(intro, session, config)
-      if (videoElement && nodes.length < config.forward.maxForwardNodes) {
-        nodes.push(h('message', { nickname: config.forward.nickname, userId: session.selfId }, videoElement))
-      }
-      await sendForwardNodes(session, nodes, config, logger)
+    if (!videoElement) {
+      logger.info(`video unavailable or skipped, fallback to image/text: ${primaryVideo}`)
     } else {
-      await session.send(h.text(intro))
-      if (videoElement) {
+      if (shouldAutoForward) {
+        const nodes = createForwardTextNodes(intro, session, config)
+        if (nodes.length < config.forward.maxForwardNodes) {
+          nodes.push(h('message', { nickname: config.forward.nickname, userId: session.selfId }, videoElement))
+        }
+        await sendForwardNodes(session, nodes, config, logger)
+      } else {
+        await session.send(h.text(intro))
         await session.send(videoElement)
       }
-    }
 
-    return
+      return
+    }
   }
 
   if (parsed.images.length > 0) {
@@ -108,32 +112,36 @@ async function buildVideoElement(
   config: Config,
   logger: Logger
 ): Promise<any> {
-  if (config.sendMode === 'url') {
-    return segment.video(url)
+  if (!isSafePublicHttpUrl(url)) {
+    logger.warn(`video send skipped by url safety policy: ${url}`)
+    return null
   }
 
+  let downloaded: DownloadedBuffer | null = null
   try {
-    const referer = inferMediaReferer(url)
-    let downloaded
-    try {
-      downloaded = await downloadBuffer(ctx, url, config.timeoutMs, referer ? {
-        referer,
-        accept: '*/*',
-      } : {
-        accept: '*/*',
-      })
-    } catch {
-      downloaded = await downloadBuffer(ctx, url, config.timeoutMs, {
-        accept: '*/*',
-      })
+    if (config.sendMode === 'url') {
+      if (config.maxVideoDurationSec && config.maxVideoDurationSec > 0) {
+        downloaded = await downloadVideoForSend(ctx, url, config)
+        if (!await isDurationAllowed(downloaded, url, config, logger)) {
+          return null
+        }
+      }
+
+      return segment.video(url)
     }
-    if (downloaded.buffer.length > config.maxMediaBytes) {
-      throw new Error(`video too large: ${downloaded.buffer.length}`)
+
+    downloaded = await downloadVideoForSend(ctx, url, config)
+    if (!await isDurationAllowed(downloaded, url, config, logger)) {
+      return null
     }
 
     const optimized = await optimizeVideoBeforeSend(downloaded.buffer, downloaded.mimeType || 'video/mp4', config, logger)
     const finalBuffer = optimized?.buffer || downloaded.buffer
     const finalMime = optimized?.mimeType || downloaded.mimeType || 'video/mp4'
+
+    if (finalBuffer.length > config.maxMediaBytes) {
+      throw new Error(`video payload too large for send: ${finalBuffer.length} > ${config.maxMediaBytes}`)
+    }
 
     try {
       return h.video(finalBuffer, finalMime)
@@ -150,8 +158,78 @@ async function buildVideoElement(
     if (!config.fallbackToUrlOnError) {
       throw error
     }
+
+    if (config.maxVideoDurationSec && config.maxVideoDurationSec > 0) {
+      const payload = downloaded || await downloadVideoForSend(ctx, url, config).catch(() => null)
+      if (!payload) {
+        logger.info(`video fallback skipped: unable to verify duration, url=${url}`)
+        return null
+      }
+
+      if (!await isDurationAllowed(payload, url, config, logger)) {
+        return null
+      }
+    }
+
+    if (!isSafePublicHttpUrl(url)) {
+      logger.warn(`video fallback skipped by url safety policy: ${url}`)
+      return null
+    }
+
     return segment.video(url)
   }
+}
+
+async function downloadVideoForSend(ctx: Context, url: string, config: Config): Promise<DownloadedBuffer> {
+  const maxVideoBytes = Math.max(config.maxMediaBytes, config.maxVideoDownloadBytes || config.maxMediaBytes)
+  const referer = inferMediaReferer(url)
+  try {
+    return await downloadBuffer(ctx, url, config.timeoutMs, {
+      headers: referer
+        ? {
+            referer,
+            accept: '*/*',
+          }
+        : {
+            accept: '*/*',
+          },
+      maxBytes: maxVideoBytes,
+    })
+  } catch {
+    return downloadBuffer(ctx, url, config.timeoutMs, {
+      headers: {
+        accept: '*/*',
+      },
+      maxBytes: maxVideoBytes,
+    })
+  }
+}
+
+async function isDurationAllowed(
+  downloaded: DownloadedBuffer,
+  url: string,
+  config: Config,
+  logger: Logger
+): Promise<boolean> {
+  if (!config.maxVideoDurationSec || config.maxVideoDurationSec <= 0) {
+    return true
+  }
+
+  const ffmpegTimeoutMs = config.autoParse?.mediaInject?.ffmpegTimeoutMs ?? 30_000
+  const durationSec = await probeVideoDuration(downloaded.buffer, downloaded.mimeType || 'video/mp4', ffmpegTimeoutMs)
+  if (durationSec == null) {
+    logger.warn(`video send skipped: duration probe failed, url=${url}`)
+    return false
+  }
+
+  if (durationSec > config.maxVideoDurationSec) {
+    const limitMin = Math.round(config.maxVideoDurationSec / 60)
+    const actualMin = Math.round(durationSec / 60)
+    logger.info(`video send skipped: duration ${actualMin}min exceeds limit ${limitMin}min, url=${url}`)
+    return false
+  }
+
+  return true
 }
 
 async function optimizeVideoBeforeSend(
@@ -201,15 +279,19 @@ async function buildImageSegments(
   const imageSegments = [] as any[]
   for (const url of urls) {
     if (config.sendMode === 'url') {
+      if (!isSafePublicHttpUrl(url)) {
+        logger.warn(`image send skipped by url safety policy: ${url}`)
+        continue
+      }
+
       imageSegments.push(segment.image(url))
       continue
     }
 
     try {
-      const downloaded = await downloadBuffer(ctx, url, config.timeoutMs)
-      if (downloaded.buffer.length > config.maxMediaBytes) {
-        throw new Error(`image too large: ${downloaded.buffer.length}`)
-      }
+      const downloaded = await downloadBuffer(ctx, url, config.timeoutMs, {
+        maxBytes: config.maxMediaBytes,
+      })
 
       const storedUrl = await toMediaUrl(ctx, downloaded.mimeType, downloaded.buffer, 'send_img', logger)
       imageSegments.push(segment.image(storedUrl))
@@ -218,6 +300,12 @@ async function buildImageSegments(
       if (!config.fallbackToUrlOnError) {
         throw error
       }
+
+      if (!isSafePublicHttpUrl(url)) {
+        logger.warn(`image fallback skipped by url safety policy: ${url}`)
+        continue
+      }
+
       imageSegments.push(segment.image(url))
     }
   }

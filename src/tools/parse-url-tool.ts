@@ -99,6 +99,8 @@ class ParseUrlTool extends Tool {
             contextMaxChars: 1500,
             injectMedia: this.config.tool.injectMedia,
             mediaInject: this.config.tool.mediaInject,
+            maxVideoDurationSec: this.config.maxVideoDurationSec,
+            maxVideoDownloadBytes: this.config.maxVideoDownloadBytes,
           },
           logger,
           'tool'

@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-social-media-parser",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "抖音、小红书和哔哩哔哩三合一解析插件，支持 ChatLuna 上下文注入",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",

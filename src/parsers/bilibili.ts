@@ -3,6 +3,7 @@ import type { Context, Logger } from 'koishi'
 import type { Config } from '../config'
 import type { ParsedContent } from '../types'
 import { requestText, resolveRedirect } from '../utils/http'
+import { isSafePublicHttpUrl } from '../utils/url'
 
 const BVID_RE = /BV[0-9a-zA-Z]{10}/i
 const AVID_RE = /(?:^|[^a-zA-Z0-9])av(\d+)/i
@@ -105,7 +106,7 @@ async function fetchVideoDirectUrl(
   config: Config,
   logger: Logger
 ): Promise<string> {
-  const endpoint = `http://api.xingzhige.com/API/b_parse/?url=${encodeURIComponent(bilibiliUrl)}`
+  const endpoint = `https://api.xingzhige.com/API/b_parse/?url=${encodeURIComponent(bilibiliUrl)}`
 
   try {
     const payload = await requestJson(ctx, endpoint, config.timeoutMs)
@@ -113,7 +114,18 @@ async function fetchVideoDirectUrl(
     const videoUrl = asString(payload?.data?.video?.url).trim()
 
     if (code === 0 && videoUrl) {
-      return normalizeResourceUrl(videoUrl)
+      const normalized = normalizeResourceUrl(videoUrl)
+      if (!isSafePublicHttpUrl(normalized)) {
+        logger.warn(`bilibili direct video blocked by url safety policy: ${normalized}`)
+        return ''
+      }
+
+      if (!isTrustedBilibiliVideoUrl(normalized)) {
+        logger.warn(`bilibili direct video blocked by host policy: ${normalized}`)
+        return ''
+      }
+
+      return normalized
     }
 
     const reason = typeof payload?.msg === 'string' ? payload.msg : `code=${code}`
@@ -287,4 +299,17 @@ function asString(value: unknown): string {
 function toNumber(value: unknown): number {
   const number = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(number) ? number : 0
+}
+
+function isTrustedBilibiliVideoUrl(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase()
+    return hostname.includes('bilivideo.')
+      || hostname === 'bilibili.com'
+      || hostname.endsWith('.bilibili.com')
+      || hostname === 'hdslb.com'
+      || hostname.endsWith('.hdslb.com')
+  } catch {
+    return false
+  }
 }

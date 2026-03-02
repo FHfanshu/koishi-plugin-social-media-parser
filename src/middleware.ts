@@ -7,6 +7,9 @@ import { DouyinSkipError } from './parsers/douyin'
 import { sendParsedContent } from './utils/media'
 import { extractSocialUrlsFromSession, isWhitelisted } from './utils/url'
 
+const COOLDOWN_MIN_TTL_MS = 60_000
+const COOLDOWN_MAX_ENTRIES = 5_000
+
 export function registerAutoParseMiddleware(
   ctx: Context,
   config: Config,
@@ -31,6 +34,8 @@ export function registerAutoParseMiddleware(
     if (!urls.length) {
       return next()
     }
+
+    cleanupCooldownMap(cooldownMap, Date.now(), config.cooldownMs)
 
     if (!isWhitelisted(session, config.autoParse.guilds, config.autoParse.users)) {
       return next()
@@ -60,6 +65,8 @@ export function registerAutoParseMiddleware(
               contextMaxChars: config.autoParse.contextMaxChars,
               injectMedia: config.autoParse.injectMedia,
               mediaInject: config.autoParse.mediaInject,
+              maxVideoDurationSec: config.maxVideoDurationSec,
+              maxVideoDownloadBytes: config.maxVideoDownloadBytes,
             },
             logger,
             'auto'
@@ -87,4 +94,27 @@ export function registerAutoParseMiddleware(
 
     return next()
   })
+}
+
+function cleanupCooldownMap(cooldownMap: Map<string, number>, now: number, cooldownMs: number): void {
+  if (cooldownMap.size === 0) {
+    return
+  }
+
+  const ttlMs = Math.max(COOLDOWN_MIN_TTL_MS, cooldownMs * 3)
+  for (const [key, lastTimestamp] of cooldownMap) {
+    if (now - lastTimestamp > ttlMs) {
+      cooldownMap.delete(key)
+    }
+  }
+
+  if (cooldownMap.size <= COOLDOWN_MAX_ENTRIES) {
+    return
+  }
+
+  const ordered = [...cooldownMap.entries()].sort((a, b) => a[1] - b[1])
+  const overflow = cooldownMap.size - COOLDOWN_MAX_ENTRIES
+  for (let i = 0; i < overflow; i += 1) {
+    cooldownMap.delete(ordered[i][0])
+  }
 }
