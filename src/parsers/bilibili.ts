@@ -1,0 +1,290 @@
+import type { Context, Logger } from 'koishi'
+
+import type { Config } from '../config'
+import type { ParsedContent } from '../types'
+import { requestText, resolveRedirect } from '../utils/http'
+
+const BVID_RE = /BV[0-9a-zA-Z]{10}/i
+const AVID_RE = /(?:^|[^a-zA-Z0-9])av(\d+)/i
+
+interface BilibiliVideoId {
+  type: 'bv' | 'av'
+  value: string
+}
+
+interface BilibiliVideoDetail {
+  title: string
+  description: string
+  owner: string
+  cover: string
+  bvid: string
+  stats: {
+    view: number
+    like: number
+    coin: number
+    favorite: number
+    share: number
+    danmaku: number
+  }
+}
+
+export async function parseBilibili(
+  ctx: Context,
+  inputUrl: string,
+  config: Config,
+  logger: Logger
+): Promise<ParsedContent> {
+  const finalUrl = await resolveRedirect(ctx, inputUrl, config.timeoutMs, logger)
+  const videoId = extractVideoId(finalUrl) || extractVideoId(inputUrl)
+  if (!videoId) {
+    throw new Error('无法从 Bilibili 链接中提取 BV/AV 号')
+  }
+
+  const detail = await fetchVideoDetail(ctx, videoId, config)
+  const canonicalUrl = detail.bvid ? `https://www.bilibili.com/video/${detail.bvid}` : finalUrl
+
+  let videoUrl = ''
+  if (config.bilibili.fetchVideo) {
+    videoUrl = await fetchVideoDirectUrl(ctx, canonicalUrl, config, logger)
+    if (!videoUrl) {
+      logger.warn(`bilibili video direct link unavailable, fallback to metadata only: ${canonicalUrl}`)
+    }
+  }
+
+  return {
+    platform: 'bilibili',
+    title: detail.title,
+    content: buildContent(detail, config.bilibili.maxDescLength),
+    images: detail.cover ? [detail.cover] : [],
+    videos: videoUrl ? [videoUrl] : [],
+    originalUrl: inputUrl,
+    resolvedUrl: canonicalUrl,
+  }
+}
+
+async function fetchVideoDetail(ctx: Context, videoId: BilibiliVideoId, config: Config): Promise<BilibiliVideoDetail> {
+  const query = videoId.type === 'bv'
+    ? `bvid=${encodeURIComponent(videoId.value)}`
+    : `aid=${encodeURIComponent(videoId.value)}`
+  const endpoint = `https://api.bilibili.com/x/web-interface/view?${query}`
+  const payload = await requestJson(ctx, endpoint, config.timeoutMs)
+
+  const code = toNumber(payload?.code)
+  if (code !== 0 || !payload?.data) {
+    const reason = typeof payload?.message === 'string' ? payload.message : `code=${code}`
+    throw new Error(`Bilibili 元数据获取失败：${reason}`)
+  }
+
+  const data = payload.data
+  const bvid = normalizeBvid(data?.bvid) || (videoId.type === 'bv' ? normalizeBvid(videoId.value) : '')
+  const title = asString(data?.title).trim() || `bilibili:${bvid || videoId.value}`
+  const description = asString(data?.desc).trim()
+  const owner = asString(data?.owner?.name).trim()
+  const cover = normalizeResourceUrl(asString(data?.pic))
+
+  return {
+    title,
+    description,
+    owner,
+    cover,
+    bvid,
+    stats: {
+      view: toNumber(data?.stat?.view),
+      like: toNumber(data?.stat?.like),
+      coin: toNumber(data?.stat?.coin),
+      favorite: toNumber(data?.stat?.favorite),
+      share: toNumber(data?.stat?.share),
+      danmaku: toNumber(data?.stat?.danmaku),
+    },
+  }
+}
+
+async function fetchVideoDirectUrl(
+  ctx: Context,
+  bilibiliUrl: string,
+  config: Config,
+  logger: Logger
+): Promise<string> {
+  const endpoint = `http://api.xingzhige.com/API/b_parse/?url=${encodeURIComponent(bilibiliUrl)}`
+
+  try {
+    const payload = await requestJson(ctx, endpoint, config.timeoutMs)
+    const code = toNumber(payload?.code)
+    const videoUrl = asString(payload?.data?.video?.url).trim()
+
+    if (code === 0 && videoUrl) {
+      return normalizeResourceUrl(videoUrl)
+    }
+
+    const reason = typeof payload?.msg === 'string' ? payload.msg : `code=${code}`
+    logger.debug(`bilibili direct video unavailable: ${reason}`)
+    return ''
+  } catch (error) {
+    logger.debug(`bilibili direct video request failed: ${String((error as Error)?.message || error)}`)
+    return ''
+  }
+}
+
+function extractVideoId(input: string): BilibiliVideoId | null {
+  if (!input) {
+    return null
+  }
+
+  try {
+    const parsed = new URL(input)
+    const queryBvid = parsed.searchParams.get('bvid')
+    if (queryBvid && BVID_RE.test(queryBvid)) {
+      return {
+        type: 'bv',
+        value: normalizeBvid(queryBvid),
+      }
+    }
+
+    const queryAid = parsed.searchParams.get('aid')
+    if (queryAid && /^\d+$/.test(queryAid)) {
+      return {
+        type: 'av',
+        value: queryAid,
+      }
+    }
+
+    const path = decodeURIComponent(parsed.pathname || '')
+    const pathBvid = path.match(/\/video\/(BV[0-9a-zA-Z]{10})/i)?.[1]
+    if (pathBvid) {
+      return {
+        type: 'bv',
+        value: normalizeBvid(pathBvid),
+      }
+    }
+
+    const pathAvid = path.match(/\/video\/av(\d+)/i)?.[1]
+    if (pathAvid) {
+      return {
+        type: 'av',
+        value: pathAvid,
+      }
+    }
+  } catch {
+    // ignore URL parse errors and fallback to global pattern matching
+  }
+
+  const bvid = input.match(BVID_RE)?.[0]
+  if (bvid) {
+    return {
+      type: 'bv',
+      value: normalizeBvid(bvid),
+    }
+  }
+
+  const avid = input.match(AVID_RE)?.[1]
+  if (avid) {
+    return {
+      type: 'av',
+      value: avid,
+    }
+  }
+
+  return null
+}
+
+async function requestJson(
+  ctx: Context,
+  url: string,
+  timeoutMs: number
+): Promise<any> {
+  const text = await requestText(ctx, url, timeoutMs, {
+    referer: 'https://www.bilibili.com/',
+    accept: 'application/json,text/plain,*/*',
+  })
+
+  if (!text || typeof text !== 'string') {
+    throw new Error('empty response')
+  }
+
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error('invalid json response')
+  }
+}
+
+function buildContent(detail: BilibiliVideoDetail, maxDescLength: number): string {
+  const lines = [
+    `UP主: ${detail.owner || '未知'}`,
+    `播放: ${formatCount(detail.stats.view)} | 点赞: ${formatCount(detail.stats.like)} | 投币: ${formatCount(detail.stats.coin)}`,
+    `收藏: ${formatCount(detail.stats.favorite)} | 转发: ${formatCount(detail.stats.share)} | 弹幕: ${formatCount(detail.stats.danmaku)}`,
+  ]
+
+  const description = truncate(detail.description, maxDescLength)
+  if (description) {
+    lines.push(`简介: ${description}`)
+  }
+
+  return lines.join('\n')
+}
+
+function truncate(input: string, maxLength: number): string {
+  if (!input) {
+    return ''
+  }
+  if (!maxLength || maxLength < 1 || input.length <= maxLength) {
+    return input
+  }
+  return `${input.slice(0, maxLength)}...`
+}
+
+function formatCount(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '0'
+  }
+  if (value >= 100_000_000) {
+    return `${formatCompact(value / 100_000_000)}亿`
+  }
+  if (value >= 10_000) {
+    return `${formatCompact(value / 10_000)}万`
+  }
+  return String(Math.floor(value))
+}
+
+function formatCompact(value: number): string {
+  return value.toFixed(1).replace(/\.0$/, '')
+}
+
+function normalizeResourceUrl(url: string): string {
+  const value = asString(url).trim()
+  if (!value) {
+    return ''
+  }
+  if (value.startsWith('//')) {
+    return `https:${value}`
+  }
+  return value
+}
+
+function normalizeBvid(value: string): string {
+  const text = asString(value).trim()
+  if (!text) {
+    return ''
+  }
+
+  const exact = text.match(/^(?:bv|BV)([0-9a-zA-Z]{10})$/)
+  if (exact) {
+    return `BV${exact[1]}`
+  }
+
+  const partial = text.match(/(?:bv|BV)([0-9a-zA-Z]{10})/)
+  if (partial) {
+    return `BV${partial[1]}`
+  }
+
+  return text
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function toNumber(value: unknown): number {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? number : 0
+}

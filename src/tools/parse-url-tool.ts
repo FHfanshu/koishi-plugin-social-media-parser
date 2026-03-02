@@ -34,7 +34,7 @@ export function registerParseUrlTool(ctx: Ctx, config: Config): void {
   const safeToolName = sanitizeToolName(toolName, 'parse_social_media')
   const safeToolDescription = sanitizeToolDescription(
     config.tool.toolDescription,
-    '解析抖音或小红书链接，返回标题、正文、图片和视频信息。'
+    '解析抖音、小红书或 Bilibili 链接，返回标题、正文、图片和视频信息。'
   )
 
   ctx.effect(() => {
@@ -71,7 +71,7 @@ class ParseUrlTool extends Tool {
     this.name = sanitizeToolName(toolName, 'parse_social_media')
     this.description = sanitizeToolDescription(
       toolDescription,
-      '解析抖音或小红书链接，返回标题、正文、图片和视频信息。'
+      '解析抖音、小红书或 Bilibili 链接，返回标题、正文、图片和视频信息。'
     )
   }
 
@@ -83,7 +83,7 @@ class ParseUrlTool extends Tool {
     const logger = this.ctx.logger('social-media-parser')
     const url = normalizeInputUrl(input)
     if (!url) {
-      return '输入中未找到有效的抖音或小红书链接。'
+      return '输入中未找到有效的抖音、小红书或 Bilibili 链接。'
     }
 
     try {

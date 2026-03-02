@@ -1,4 +1,4 @@
-export type SocialPlatform = 'douyin' | 'xiaohongshu'
+export type SocialPlatform = 'douyin' | 'xiaohongshu' | 'bilibili'
 
 export type SendMode = 'base64' | 'url'
 

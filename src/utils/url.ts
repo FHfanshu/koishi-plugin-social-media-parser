@@ -19,6 +19,7 @@ const HTML_ENTITY_MAP: Record<string, string> = {
 
 const DOUYIN_HOST_RE = /(^|\.)((v\.douyin\.com)|(www\.douyin\.com)|(www\.iesdouyin\.com))$/i
 const XIAOHONGSHU_HOST_RE = /(^|\.)((xiaohongshu\.com)|(xhslink\.com))$/i
+const BILIBILI_HOST_RE = /(^|\.)((bilibili\.com)|(b23\.tv)|(bili22\.cn)|(bili23\.cn)|(bili33\.cn)|(bili2233\.cn))$/i
 
 export function decodeHtmlEntities(value: string): string {
   if (!value || !value.includes('&')) {
@@ -91,6 +92,9 @@ export function detectPlatformByUrl(input: string): SocialPlatform | null {
   }
   if (XIAOHONGSHU_HOST_RE.test(host)) {
     return 'xiaohongshu'
+  }
+  if (BILIBILI_HOST_RE.test(host)) {
+    return 'bilibili'
   }
 
   return null

@@ -10,16 +10,30 @@ export const name = 'social-media-parser'
 
 export const inject = {
   required: ['http'],
-  optional: ['puppeteer', 'chatluna', 'chatluna_character'],
+  optional: ['puppeteer', 'chatluna', 'chatluna_character', 'chatluna_storage'],
 } as const
 
 export const usage = `
 ## Social Media Parser
 
-抖音 + 小红书二合一解析插件，支持：
+抖音 + 小红书 + 哔哩哔哩三合一解析插件，支持：
 - 自动解析（guild 白名单）
 - 手动命令：\`parse <url>\`
 - ChatLuna 工具：\`parse_social_media\`
+
+### 依赖项
+
+- 必需：\`http\`（用于 API 请求与媒体下载）
+- 可选：\`puppeteer\`（抖音 API 失败时回退抓取）
+- 可选：\`chatluna\`（注册 \`parse_social_media\` 工具）
+- 可选：\`chatluna_character\`（角色相关广播能力，可选）
+- 可选：\`chatluna_storage\`（媒体持久化存储，避免 base64 data URI）
+
+### 支持平台
+
+- 抖音：\`v.douyin.com\` / \`www.douyin.com\` / \`www.iesdouyin.com\`
+- 小红书：\`xiaohongshu.com\` / \`xhslink.com\`
+- 哔哩哔哩：\`bilibili.com\` / \`b23.tv\` / \`bili22.cn\` / \`bili23.cn\` / \`bili33.cn\` / \`bili2233.cn\`
 
 ### 自动解析与上下文注入
 

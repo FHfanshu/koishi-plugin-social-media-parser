@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-social-media-parser",
-  "version": "0.1.0",
-  "description": "抖音和小红书二合一解析插件，支持 ChatLuna 上下文注入",
+  "version": "0.1.1",
+  "description": "抖音、小红书和哔哩哔哩三合一解析插件，支持 ChatLuna 上下文注入",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -16,6 +16,7 @@
     "plugin",
     "douyin",
     "xiaohongshu",
+    "bilibili",
     "chatluna"
   ],
   "license": "MIT",
@@ -38,7 +39,7 @@
   },
   "koishi": {
     "description": {
-      "zh": "抖音+小红书二合一解析插件，支持自动解析、手动命令和 ChatLuna 工具注入"
+      "zh": "抖音+小红书+B站三合一解析插件，支持自动解析、手动命令和 ChatLuna 工具注入"
     },
     "service": {
       "required": [

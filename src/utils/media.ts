@@ -5,6 +5,7 @@ import type { Config } from '../config'
 import type { ParsedContent } from '../types'
 import { processVideoForContext } from './compress'
 import { downloadBuffer } from './http'
+import { toMediaUrl } from './storage'
 
 export async function sendParsedContent(
   ctx: Context,
@@ -15,7 +16,11 @@ export async function sendParsedContent(
 ): Promise<void> {
   const isOneBot = session.platform === 'onebot'
   const sourceUrl = simplifyDisplayUrl(parsed.resolvedUrl || parsed.originalUrl)
-  const platformName = parsed.platform === 'douyin' ? '抖音' : '小红书'
+  const platformName = parsed.platform === 'douyin'
+    ? '抖音'
+    : parsed.platform === 'bilibili'
+      ? '哔哩哔哩'
+      : '小红书'
   const textBody = parsed.content?.trim() ? truncateText(parsed.content.trim(), 350) : ''
 
   const intro = [
@@ -133,6 +138,10 @@ async function buildVideoElement(
     try {
       return h.video(finalBuffer, finalMime)
     } catch {
+      const storedUrl = await toMediaUrl(ctx, finalMime, finalBuffer, 'send_video', logger)
+      if (storedUrl.startsWith('http')) {
+        return segment.video(storedUrl)
+      }
       const base64 = finalBuffer.toString('base64')
       return segment.video(`base64://${base64}`)
     }
@@ -202,8 +211,8 @@ async function buildImageSegments(
         throw new Error(`image too large: ${downloaded.buffer.length}`)
       }
 
-      const base64 = downloaded.buffer.toString('base64')
-      imageSegments.push(segment.image(`data:${downloaded.mimeType};base64,${base64}`))
+      const storedUrl = await toMediaUrl(ctx, downloaded.mimeType, downloaded.buffer, 'send_img', logger)
+      imageSegments.push(segment.image(storedUrl))
     } catch (error) {
       logger.debug(`image base64 send failed: ${String((error as Error)?.message || error)}`)
       if (!config.fallbackToUrlOnError) {
@@ -266,6 +275,9 @@ function inferMediaReferer(url: string): string {
     }
     if (host.includes('xiaohongshu.com') || host.includes('xhscdn.com')) {
       return 'https://www.xiaohongshu.com/'
+    }
+    if (host.includes('bilibili.com') || host.includes('bilivideo.')) {
+      return 'https://www.bilibili.com/'
     }
   } catch {
     // ignore

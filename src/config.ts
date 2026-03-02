@@ -36,6 +36,12 @@ export interface XiaohongshuConfig {
   maxImages: number
 }
 
+export interface BilibiliConfig {
+  enabled: boolean
+  fetchVideo: boolean
+  maxDescLength: number
+}
+
 export interface ForwardConfig {
   enabled: boolean
   nickname: string
@@ -79,6 +85,7 @@ export interface Config {
   debug: boolean
   douyin: DouyinConfig
   xiaohongshu: XiaohongshuConfig
+  bilibili: BilibiliConfig
   forward: ForwardConfig
   autoParse: AutoParseConfig
   tool: ToolConfig
@@ -131,6 +138,11 @@ export const Config: Schema<Config> = Schema.intersect([
       maxRetries: Schema.number().default(3).min(1).max(6).description('抓取失败重试次数'),
       maxImages: Schema.number().default(20).min(1).max(40).description('图文最多保留图片数量'),
     }).description('小红书解析设置'),
+    bilibili: Schema.object({
+      enabled: Schema.boolean().default(true).description('启用 Bilibili 解析'),
+      fetchVideo: Schema.boolean().default(true).description('尝试获取视频直链（第三方 API，可能不稳定）'),
+      maxDescLength: Schema.number().default(100).min(20).max(500).description('视频简介最大字符数'),
+    }).description('Bilibili 解析设置'),
     forward: Schema.object({
       enabled: Schema.boolean().default(true).description('图片内容优先使用合并转发（OneBot）'),
       nickname: Schema.string().default('内容解析').description('合并转发显示昵称'),
@@ -156,7 +168,7 @@ export const Config: Schema<Config> = Schema.intersect([
     tool: Schema.object({
       enabled: Schema.boolean().default(true).description('注册 ChatLuna 工具'),
       toolName: Schema.string().default('parse_social_media').description('工具名称'),
-      toolDescription: Schema.string().default('解析抖音或小红书链接并返回结构化内容摘要。').description('工具描述'),
+      toolDescription: Schema.string().default('解析抖音、小红书或 Bilibili 链接并返回结构化内容摘要。').description('工具描述'),
       contentLevel: Schema.union([
         Schema.const('summary').description('返回摘要（推荐）'),
         Schema.const('full').description('返回尽可能完整的正文与媒体列表')
