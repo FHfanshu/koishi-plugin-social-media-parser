@@ -19,6 +19,9 @@ interface BilibiliVideoDetail {
   owner: string
   cover: string
   bvid: string
+  aid: string
+  cid: string
+  durationSec: number
   stats: {
     view: number
     like: number
@@ -46,7 +49,7 @@ export async function parseBilibili(
 
   let videoUrl = ''
   if (config.bilibili.fetchVideo) {
-    videoUrl = await fetchVideoDirectUrl(ctx, canonicalUrl, config, logger)
+    videoUrl = await fetchVideoDirectUrl(ctx, detail, canonicalUrl, config, logger)
     if (!videoUrl) {
       logger.warn(`bilibili video direct link unavailable, fallback to metadata only: ${canonicalUrl}`)
     }
@@ -58,6 +61,7 @@ export async function parseBilibili(
     content: buildContent(detail, config.bilibili.maxDescLength),
     images: detail.cover ? [detail.cover] : [],
     videos: videoUrl ? [videoUrl] : [],
+    videoDurationSec: detail.durationSec > 0 ? detail.durationSec : undefined,
     originalUrl: inputUrl,
     resolvedUrl: canonicalUrl,
   }
@@ -78,10 +82,13 @@ async function fetchVideoDetail(ctx: Context, videoId: BilibiliVideoId, config: 
 
   const data = payload.data
   const bvid = normalizeBvid(data?.bvid) || (videoId.type === 'bv' ? normalizeBvid(videoId.value) : '')
+  const aid = normalizeAid(data?.aid) || (videoId.type === 'av' ? normalizeAid(videoId.value) : '')
+  const cid = normalizeCid(data?.cid) || normalizeCid(data?.pages?.[0]?.cid)
   const title = asString(data?.title).trim() || `bilibili:${bvid || videoId.value}`
   const description = asString(data?.desc).trim()
   const owner = asString(data?.owner?.name).trim()
   const cover = normalizeResourceUrl(asString(data?.pic))
+  const durationSec = toNumber(data?.duration)
 
   return {
     title,
@@ -89,6 +96,9 @@ async function fetchVideoDetail(ctx: Context, videoId: BilibiliVideoId, config: 
     owner,
     cover,
     bvid,
+    aid,
+    cid,
+    durationSec,
     stats: {
       view: toNumber(data?.stat?.view),
       like: toNumber(data?.stat?.like),
@@ -101,6 +111,74 @@ async function fetchVideoDetail(ctx: Context, videoId: BilibiliVideoId, config: 
 }
 
 async function fetchVideoDirectUrl(
+  ctx: Context,
+  detail: BilibiliVideoDetail,
+  bilibiliUrl: string,
+  config: Config,
+  logger: Logger
+): Promise<string> {
+  const officialUrl = await fetchVideoDirectUrlViaOfficialApi(ctx, detail, config, logger)
+  if (officialUrl) {
+    return officialUrl
+  }
+
+  const xingzhigeUrl = await fetchVideoDirectUrlViaXingzhige(ctx, bilibiliUrl, config, logger)
+  if (xingzhigeUrl) {
+    return xingzhigeUrl
+  }
+
+  const injahowUrl = await fetchVideoDirectUrlViaInjahow(ctx, detail, config, logger)
+  if (injahowUrl) {
+    return injahowUrl
+  }
+
+  return ''
+}
+
+async function fetchVideoDirectUrlViaOfficialApi(
+  ctx: Context,
+  detail: BilibiliVideoDetail,
+  config: Config,
+  logger: Logger
+): Promise<string> {
+  if (!detail.bvid || !detail.cid) {
+    return ''
+  }
+
+  const endpoint = `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(detail.bvid)}&cid=${encodeURIComponent(detail.cid)}&qn=80&fnval=0&fnver=0&fourk=1`
+
+  try {
+    const payload = await requestJson(ctx, endpoint, config.timeoutMs)
+    const code = toNumber(payload?.code)
+    if (code !== 0 || !payload?.data) {
+      const reason = typeof payload?.message === 'string' ? payload.message : `code=${code}`
+      logger.debug(`bilibili official playurl unavailable: ${reason}`)
+      return ''
+    }
+
+    const candidateUrls = collectPlayUrls(payload.data)
+    for (const candidate of candidateUrls) {
+      if (!isSafePublicHttpUrl(candidate)) {
+        logger.warn(`bilibili official url blocked by url safety policy: ${candidate}`)
+        continue
+      }
+
+      if (!isTrustedBilibiliVideoUrl(candidate)) {
+        logger.warn(`bilibili official url blocked by host policy: ${candidate}`)
+        continue
+      }
+
+      return candidate
+    }
+
+    return ''
+  } catch (error) {
+    logger.debug(`bilibili official playurl request failed: ${String((error as Error)?.message || error)}`)
+    return ''
+  }
+}
+
+async function fetchVideoDirectUrlViaXingzhige(
   ctx: Context,
   bilibiliUrl: string,
   config: Config,
@@ -129,12 +207,95 @@ async function fetchVideoDirectUrl(
     }
 
     const reason = typeof payload?.msg === 'string' ? payload.msg : `code=${code}`
-    logger.debug(`bilibili direct video unavailable: ${reason}`)
+    logger.debug(`bilibili xingzhige unavailable: ${reason}`)
     return ''
   } catch (error) {
-    logger.debug(`bilibili direct video request failed: ${String((error as Error)?.message || error)}`)
+    logger.debug(`bilibili xingzhige request failed: ${String((error as Error)?.message || error)}`)
     return ''
   }
+}
+
+async function fetchVideoDirectUrlViaInjahow(
+  ctx: Context,
+  detail: BilibiliVideoDetail,
+  config: Config,
+  logger: Logger
+): Promise<string> {
+  if (!detail.bvid && !detail.aid) {
+    return ''
+  }
+
+  const query = detail.bvid
+    ? `bv=${encodeURIComponent(detail.bvid)}`
+    : `av=${encodeURIComponent(detail.aid)}`
+
+  const endpoint = `https://api.injahow.cn/bparse/?${query}&p=1&q=64&format=mp4&otype=json`
+
+  try {
+    const payload = await requestJson(ctx, endpoint, config.timeoutMs)
+    const code = toNumber(payload?.code)
+    const videoUrl = normalizeResourceUrl(asString(payload?.url).trim())
+
+    if (code === 0 && videoUrl) {
+      if (!isSafePublicHttpUrl(videoUrl)) {
+        logger.warn(`bilibili injahow blocked by url safety policy: ${videoUrl}`)
+        return ''
+      }
+
+      if (!isTrustedBilibiliVideoUrl(videoUrl)) {
+        logger.warn(`bilibili injahow blocked by host policy: ${videoUrl}`)
+        return ''
+      }
+
+      return videoUrl
+    }
+
+    const reason = typeof payload?.msg === 'string' ? payload.msg : `code=${code}`
+    logger.debug(`bilibili injahow unavailable: ${reason}`)
+    return ''
+  } catch (error) {
+    logger.debug(`bilibili injahow request failed: ${String((error as Error)?.message || error)}`)
+    return ''
+  }
+}
+
+function collectPlayUrls(data: any): string[] {
+  const urls: string[] = []
+
+  if (Array.isArray(data?.durl)) {
+    for (const item of data.durl) {
+      urls.push(normalizeResourceUrl(item?.url))
+      if (Array.isArray(item?.backup_url)) {
+        for (const backup of item.backup_url) {
+          urls.push(normalizeResourceUrl(backup))
+        }
+      }
+      if (Array.isArray(item?.backupUrl)) {
+        for (const backup of item.backupUrl) {
+          urls.push(normalizeResourceUrl(backup))
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(data?.dash?.video)) {
+    for (const item of data.dash.video) {
+      urls.push(normalizeResourceUrl(item?.base_url))
+      urls.push(normalizeResourceUrl(item?.baseUrl))
+      if (Array.isArray(item?.backup_url)) {
+        for (const backup of item.backup_url) {
+          urls.push(normalizeResourceUrl(backup))
+        }
+      }
+      if (Array.isArray(item?.backupUrl)) {
+        for (const backup of item.backupUrl) {
+          urls.push(normalizeResourceUrl(backup))
+        }
+      }
+    }
+  }
+
+  return Array.from(new Set(urls.filter(Boolean)))
 }
 
 function extractVideoId(input: string): BilibiliVideoId | null {
@@ -290,6 +451,32 @@ function normalizeBvid(value: string): string {
   }
 
   return text
+}
+
+function normalizeAid(value: unknown): string {
+  const text = asString(value).trim()
+  if (/^\d+$/.test(text)) {
+    return text
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(Math.trunc(value))
+  }
+
+  return ''
+}
+
+function normalizeCid(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(Math.trunc(value))
+  }
+
+  const text = asString(value).trim()
+  if (/^\d+$/.test(text)) {
+    return text
+  }
+
+  return ''
 }
 
 function asString(value: unknown): string {

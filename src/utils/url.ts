@@ -5,6 +5,8 @@ import type { Session } from 'koishi'
 import type { SocialPlatform } from '../types'
 
 const URL_EXTRACT_PATTERN = /https?:\/\/[^\s]+/gi
+const ESCAPED_URL_EXTRACT_PATTERN = /https?:\\\/\\\/[^\s]+/gi
+const DOUYIN_LOOSE_URL_PATTERN = /https?:\/\/\s*(?:v\s*\.\s*d\s*o\s*u\s*y\s*i\s*n\s*\.\s*c\s*o\s*m|w\s*w\s*w\s*\.\s*d\s*o\s*u\s*y\s*i\s*n\s*\.\s*c\s*o\s*m|w\s*w\s*w\s*\.\s*i\s*e\s*s\s*d\s*o\s*u\s*y\s*i\s*n\s*\.\s*c\s*o\s*m)\s*\/\s*[a-zA-Z0-9_-]+\/?/gi
 const TRAILING_PUNCTUATION_PATTERN = /[)\]\}>"'。！？!?！，,。.、；：…]+$/u
 const HTML_ENTITY_REGEX = /&(#x?[0-9a-f]+|\w+);/gi
 const PRIVATE_IPV4_REGEX = /^(0\.|10\.|127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)/
@@ -22,6 +24,7 @@ const HTML_ENTITY_MAP: Record<string, string> = {
 const DOUYIN_HOST_RE = /(^|\.)((v\.douyin\.com)|(www\.douyin\.com)|(www\.iesdouyin\.com))$/i
 const XIAOHONGSHU_HOST_RE = /(^|\.)((xiaohongshu\.com)|(xhslink\.com))$/i
 const BILIBILI_HOST_RE = /(^|\.)((bilibili\.com)|(b23\.tv)|(bili22\.cn)|(bili23\.cn)|(bili33\.cn)|(bili2233\.cn))$/i
+const TWITTER_HOST_RE = /(^|\.)((x\.com)|(twitter\.com)|(mobile\.x\.com)|(mobile\.twitter\.com)|(m\.twitter\.com)|(t\.co)|(fxtwitter\.com)|(vxtwitter\.com))$/i
 
 export function decodeHtmlEntities(value: string): string {
   if (!value || !value.includes('&')) {
@@ -51,7 +54,7 @@ export function decodeHtmlEntities(value: string): string {
 }
 
 export function sanitizeExtractedUrl(raw: string): string {
-  return decodeHtmlEntities(raw.replace(TRAILING_PUNCTUATION_PATTERN, '').trim())
+  return decodeEscapedUrl(decodeHtmlEntities(raw)).replace(TRAILING_PUNCTUATION_PATTERN, '').trim()
 }
 
 export function extractCandidateUrls(text: string): string[] {
@@ -60,7 +63,18 @@ export function extractCandidateUrls(text: string): string[] {
   }
 
   const matches = text.match(URL_EXTRACT_PATTERN) ?? []
-  return dedupe(matches.map((item) => sanitizeExtractedUrl(item)).filter(Boolean))
+  const escapedMatches = text.match(ESCAPED_URL_EXTRACT_PATTERN) ?? []
+  const looseMatches = text.match(DOUYIN_LOOSE_URL_PATTERN) ?? []
+
+  return dedupe(
+    [
+      ...matches,
+      ...escapedMatches.map((value) => decodeEscapedUrl(value)),
+      ...looseMatches.map((value) => compactLooseUrl(value)),
+    ]
+      .map((item) => sanitizeExtractedUrl(item))
+      .filter(Boolean)
+  )
 }
 
 export function isPrivateHostname(hostname: string): boolean {
@@ -116,6 +130,9 @@ export function detectPlatformByUrl(input: string): SocialPlatform | null {
   }
   if (BILIBILI_HOST_RE.test(host)) {
     return 'bilibili'
+  }
+  if (TWITTER_HOST_RE.test(host)) {
+    return 'twitter'
   }
 
   return null
@@ -192,44 +209,42 @@ export function extractSocialUrlsFromSession(session: Session): string[] {
         continue
       }
 
-      if (element.type !== 'json') {
-        continue
-      }
-
-      const raw = element.attrs?.data ?? element.attrs?.content ?? element.data?.data ?? element.data?.content
-      if (typeof raw === 'string') {
-        try {
-          const parsed = JSON.parse(decodeHtmlEntities(raw))
-          urls.push(...extractUrlsFromAny(parsed))
-        } catch {
-          urls.push(...extractCandidateUrls(raw))
+      if (element.type === 'json' || element.type === 'xml' || element.type === 'app') {
+        const raw = element.attrs?.data ?? element.attrs?.content ?? element.data?.data ?? element.data?.content
+        if (typeof raw === 'string') {
+          try {
+            const parsed = JSON.parse(decodeEscapedUrl(decodeHtmlEntities(raw)))
+            urls.push(...extractUrlsFromAny(parsed))
+          } catch {
+            urls.push(...extractCandidateUrls(raw))
+          }
+        } else {
+          urls.push(...extractUrlsFromAny(raw))
         }
-      } else {
-        urls.push(...extractUrlsFromAny(raw))
       }
     }
   }
 
-  return dedupe(
-    urls
-      .map((url) => normalizeSingleUrl(url))
-      .filter((url): url is string => Boolean(url))
-  )
+  const normalized = urls
+    .map((url) => normalizeSingleUrl(url))
+    .filter((url): url is string => Boolean(url))
+
+  return dedupeByCanonicalPath(normalized)
 }
 
-export function isWhitelisted(session: Session, guilds: string[], users: string[]): boolean {
+export function isBlocked(session: Session, blockedGuilds: string[], blockedUsers: string[]): boolean {
   const platform = typeof session.platform === 'string' ? session.platform : ''
   const guildId = typeof session.guildId === 'string' ? session.guildId : ''
   const channelId = typeof session.channelId === 'string' ? session.channelId : ''
   const userId = typeof session.userId === 'string' ? session.userId : ''
 
-  if (matchId(guildId, platform, guilds)) {
+  if (matchId(guildId, platform, blockedGuilds)) {
     return true
   }
-  if (matchId(channelId, platform, guilds)) {
+  if (matchId(channelId, platform, blockedGuilds)) {
     return true
   }
-  if (matchId(userId, platform, users)) {
+  if (matchId(userId, platform, blockedUsers)) {
     return true
   }
 
@@ -302,6 +317,75 @@ function extractUrlsFromAny(value: unknown): string[] {
 
 function dedupe(list: string[]): string[] {
   return Array.from(new Set(list))
+}
+
+function dedupeByCanonicalPath(urls: string[]): string[] {
+  const result: string[] = []
+  const seen = new Set<string>()
+
+  for (const url of urls) {
+    const key = canonicalUrlKey(url)
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    result.push(url)
+  }
+
+  return result
+}
+
+function canonicalUrlKey(url: string): string {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    const path = parsed.pathname.replace(/\/+$/, '')
+
+    if (XIAOHONGSHU_HOST_RE.test(host)) {
+      const noteMatch = path.match(/\/(explore|item|note|notes|post|detail|discovery\/item)\/([^/?#]+)/i)
+      if (noteMatch?.[2]) {
+        return `xhs:${noteMatch[2]}`
+      }
+    }
+
+    if (DOUYIN_HOST_RE.test(host)) {
+      const videoMatch = path.match(/\/(?:video|note)\/(\d+)/i)
+      if (videoMatch?.[1]) {
+        return `douyin:${videoMatch[1]}`
+      }
+    }
+
+    if (BILIBILI_HOST_RE.test(host)) {
+      const bvMatch = path.match(/\/(BV[a-zA-Z0-9]+)/i)
+      if (bvMatch?.[1]) {
+        return `bili:${bvMatch[1]}`
+      }
+      const avMatch = path.match(/\/av(\d+)/i)
+      if (avMatch?.[1]) {
+        return `bili:av${avMatch[1]}`
+      }
+    }
+
+    return `${host}${path}`
+  } catch {
+    return url
+  }
+}
+
+function decodeEscapedUrl(value: string): string {
+  return value
+    .replace(/\\u002f/gi, '/')
+    .replace(/\\\//g, '/')
+}
+
+function compactLooseUrl(value: string): string {
+  if (!value) {
+    return value
+  }
+
+  return value
+    .replace(/[\u200b-\u200f\ufeff]/g, '')
+    .replace(/\s+/g, '')
 }
 
 function isPrivateIpv6(hostname: string): boolean {

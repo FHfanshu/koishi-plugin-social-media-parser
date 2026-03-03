@@ -1,4 +1,4 @@
-export type SocialPlatform = 'douyin' | 'xiaohongshu' | 'bilibili'
+export type SocialPlatform = 'douyin' | 'xiaohongshu' | 'bilibili' | 'twitter'
 
 export type SendMode = 'base64' | 'url'
 
@@ -10,6 +10,7 @@ export interface ParsedContent {
   content: string
   images: string[]
   videos: string[]
+  videoDurationSec?: number
   musicUrl?: string
   originalUrl: string
   resolvedUrl?: string

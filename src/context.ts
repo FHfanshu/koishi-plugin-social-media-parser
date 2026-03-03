@@ -6,6 +6,7 @@ import type { ParsedContent } from './types'
 import { processVideoForContext, probeVideoDuration, compressImageForContext } from './utils/compress'
 import { downloadBuffer } from './utils/http'
 import { toMediaUrl } from './utils/storage'
+import { isSafePublicHttpUrl } from './utils/url'
 
 export interface InjectContextOptions {
   contextMaxChars: number
@@ -137,15 +138,25 @@ async function buildMediaInjectionMessage(
       )
 
       let shouldProcessVideo = true
+      const knownDurationSec = Number.isFinite(parsed.videoDurationSec)
+        ? Number(parsed.videoDurationSec)
+        : null
 
       // Duration guard: skip video injection if over the global limit
       if (maxVideoDurationSec && maxVideoDurationSec > 0) {
-        const durationSec = await probeVideoDuration(downloaded.buffer, downloaded.mimeType, mediaConfig.ffmpegTimeoutMs)
+        const durationSec = knownDurationSec && knownDurationSec > 0
+          ? knownDurationSec
+          : await probeVideoDuration(downloaded.buffer, downloaded.mimeType, mediaConfig.ffmpegTimeoutMs)
+
         if (durationSec == null) {
-          shouldProcessVideo = false
-          skipReasons.push('video duration probe failed')
-          videoSkipReason = 'video duration probe failed'
-          logger.warn(`context video inject skipped: duration probe failed, source=${videoUrl}`)
+          if (parsed.platform === 'bilibili') {
+            logger.warn(`context video duration probe failed, continue with unknown duration: source=${videoUrl}`)
+          } else {
+            shouldProcessVideo = false
+            skipReasons.push('video duration probe failed')
+            videoSkipReason = 'video duration probe failed'
+            logger.warn(`context video inject skipped: duration probe failed, source=${videoUrl}`)
+          }
         } else if (durationSec > maxVideoDurationSec) {
           shouldProcessVideo = false
           const limitMin = Math.round(maxVideoDurationSec / 60)
@@ -214,8 +225,20 @@ async function buildMediaInjectionMessage(
             }
           }
         } else {
-          skipReasons.push('video processing returned empty')
-          videoSkipReason = 'video processing returned empty'
+          if (parsed.platform === 'bilibili' && isSafePublicHttpUrl(videoUrl)) {
+            injectedVideo = true
+            parts.push({
+              type: 'video_url',
+              video_url: {
+                url: videoUrl,
+                mimeType: downloaded.mimeType || 'video/mp4',
+              },
+            })
+            logger.warn(`context video processing empty, fallback to raw video url: source=${videoUrl}`)
+          } else {
+            skipReasons.push('video processing returned empty')
+            videoSkipReason = 'video processing returned empty'
+          }
         }
       }
     } catch (error) {

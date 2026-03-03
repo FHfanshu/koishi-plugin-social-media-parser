@@ -20,19 +20,7 @@ interface DouyinImageMedia {
 
 type DouyinMedia = DouyinVideoMedia | DouyinImageMedia
 
-const DOUYIN_ID_RE_LIST = [
-  /\/video\/(\d+)/,
-  /\/note\/(\d+)/,
-  /\/share\/(?:video|note)\/(\d+)/,
-  /[?&](?:aweme_id|modal_id|item_id)=(\d+)/,
-]
-
-export class DouyinSkipError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'DouyinSkipError'
-  }
-}
+const IMAGE_SUFFIX_RE = /\.(?:png|jpe?g|webp|gif|bmp)(?:$|\?)/i
 
 export async function parseDouyin(
   ctx: Context,
@@ -40,28 +28,38 @@ export async function parseDouyin(
   config: Config,
   logger: Logger
 ): Promise<ParsedContent> {
-  const finalUrl = await resolveRedirect(ctx, inputUrl, config.timeoutMs, logger)
+  const apiBaseUrl = normalizeApiBaseUrl(config.douyin.apiBaseUrl || 'https://api.douyin.wtf')
+  const timeoutMs = Math.max(30_000, config.timeoutMs)
+  const payload = await fetchHybridPayload(
+    ctx,
+    apiBaseUrl,
+    config.douyin.fallbackApiBaseUrls,
+    inputUrl,
+    timeoutMs,
+    logger,
+    config.debug
+  )
+  const data = payload?.data ?? payload
+  const code = toNumber(payload?.code)
 
-  if (config.douyin.parseMode === 'video-only' && !/\/video\/(\d+)/.test(finalUrl)) {
-    throw new DouyinSkipError('当前仅支持抖音视频链接。')
+  if (code >= 400) {
+    const reason = extractRemoteError(payload)
+    throw new Error(`抖音解析失败：${reason || `code=${code}`}`)
   }
 
-  const awemeId = extractAwemeId(finalUrl)
-  if (!awemeId) {
-    throw new Error('无法从抖音链接中提取作品 ID')
+  if (!data || typeof data !== 'object') {
+    const reason = extractRemoteError(payload) || `code=${code}`
+    throw new Error(`抖音解析失败：${reason}`)
   }
 
-  let media: DouyinMedia
-  try {
-    media = await fetchDouyinMedia(ctx, awemeId, config, logger)
-  } catch (error) {
-    if (config.douyin.puppeteerFallback && (ctx as any).puppeteer) {
-      logger.info('抖音 API 解析失败，切换 Puppeteer 回退。')
-      media = await fetchDouyinMediaViaPuppeteer(ctx, finalUrl, awemeId, config, logger)
-    } else {
-      throw error
-    }
-  }
+  const media = pickMediaFromHybrid(data, inputUrl, config, logger)
+  const resolvedUrl = pickString(
+    data?.aweme_detail?.share_url,
+    data?.aweme_detail?.share_info?.share_url,
+    data?.share_url,
+    data?.url,
+    inputUrl
+  )
 
   if (media.kind === 'video') {
     return {
@@ -72,7 +70,7 @@ export async function parseDouyin(
       videos: [media.url],
       musicUrl: media.musicUrl,
       originalUrl: inputUrl,
-      resolvedUrl: finalUrl,
+      resolvedUrl,
     }
   }
 
@@ -84,58 +82,307 @@ export async function parseDouyin(
     videos: [],
     musicUrl: media.musicUrl,
     originalUrl: inputUrl,
-    resolvedUrl: finalUrl,
+    resolvedUrl,
   }
 }
 
-function extractAwemeId(url: string): string | null {
-  for (const re of DOUYIN_ID_RE_LIST) {
-    const match = re.exec(url)
-    if (match?.[1]) {
-      return match[1]
+async function fetchHybridPayload(
+  ctx: Context,
+  apiBaseUrl: string,
+  fallbackApiBaseUrls: string[] | undefined,
+  inputUrl: string,
+  timeoutMs: number,
+  logger: Logger,
+  debugEnabled: boolean
+): Promise<any> {
+  const apiBases = buildApiBaseCandidates(apiBaseUrl, fallbackApiBaseUrls)
+  const urls = [inputUrl]
+
+  let resolvedUrl = ''
+  try {
+    resolvedUrl = await resolveRedirect(ctx, inputUrl, Math.min(timeoutMs, 20_000), logger)
+  } catch {
+    resolvedUrl = ''
+  }
+
+  if (resolvedUrl && resolvedUrl !== inputUrl) {
+    urls.push(resolvedUrl)
+  }
+
+  const attempts: Array<{ endpoint: string; minimal: boolean }> = []
+  for (const base of apiBases) {
+    for (const url of urls) {
+      attempts.push({ endpoint: `${base}/api/hybrid/video_data?url=${encodeURIComponent(url)}&minimal=false`, minimal: false })
+      attempts.push({ endpoint: `${base}/api/hybrid/video_data?url=${encodeURIComponent(url)}&minimal=true`, minimal: true })
     }
   }
-  return null
+
+  let lastError: Error | null = null
+  for (let index = 0; index < attempts.length; index += 1) {
+    const current = attempts[index]
+    try {
+      const payload = await fetchJson(ctx, current.endpoint, timeoutMs)
+      const code = toNumber(payload?.code)
+
+      if (code && code >= 400) {
+        const reason = extractRemoteError(payload)
+        if (debugEnabled) {
+          logger.info(`douyin hybrid rejected (${code}): ${reason || 'unknown reason'}; endpoint=${current.endpoint}`)
+        }
+        lastError = new Error(reason || `code=${code}`)
+        continue
+      }
+
+      return payload
+    } catch (error) {
+      const message = (error as Error)?.message || String(error)
+      lastError = error instanceof Error ? error : new Error(message)
+      if (debugEnabled) {
+        logger.info(`douyin hybrid request failed: ${message}; endpoint=${current.endpoint}`)
+      }
+
+      if (index < attempts.length - 1) {
+        await sleep(250)
+      }
+    }
+  }
+
+  throw lastError || new Error('抖音解析请求失败')
 }
 
-function normalizePlayUrl(url: string): string {
-  return url.replace('/playwm/', '/play/')
+function pickMediaFromHybrid(root: any, inputUrl: string, config: Config, logger: Logger): DouyinMedia {
+  const nodes = collectMediaNodes(root)
+  let imageFallback: DouyinImageMedia | null = null
+
+  for (const node of nodes) {
+    const title = extractTitle(node, inputUrl)
+    const musicUrl = extractMusicUrl(node)
+
+    const videos = extractVideoUrls(node)
+    if (videos.length > 0) {
+      return {
+        kind: 'video',
+        title,
+        url: videos[0],
+        musicUrl,
+      }
+    }
+
+    if (!imageFallback) {
+      const images = extractImageUrls(node, config.douyin.maxImages)
+      if (images.length > 0) {
+        imageFallback = {
+          kind: 'images',
+          title,
+          urls: images,
+          musicUrl,
+        }
+      }
+    }
+  }
+
+  if (imageFallback) {
+    return imageFallback
+  }
+
+  if (config.debug) {
+    logger.info(`douyin hybrid payload unsupported: ${JSON.stringify(trimForDebug(root))}`)
+  }
+  throw new Error('抖音解析失败：未找到可用的视频或图文资源')
 }
 
-async function fetchDouyinMedia(
-  ctx: Context,
-  awemeId: string,
-  config: Config,
-  logger: Logger
-): Promise<DouyinMedia> {
-  const endpoints = [
-    `https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids=${awemeId}`,
-    `https://www.iesdouyin.com/aweme/v1/web/aweme/detail/?aweme_id=${awemeId}`,
-    `https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=${awemeId}`,
+function collectMediaNodes(root: unknown): any[] {
+  if (!root || typeof root !== 'object') {
+    return []
+  }
+
+  const nodes: any[] = []
+  const queue: any[] = [root]
+  const visited = new Set<any>()
+  let steps = 0
+
+  while (queue.length > 0) {
+    const current = queue.shift()
+    steps += 1
+    if (steps > 20_000) {
+      break
+    }
+
+    if (!current || typeof current !== 'object') {
+      continue
+    }
+
+    if (visited.has(current)) {
+      continue
+    }
+    visited.add(current)
+
+    if (isMediaLikeNode(current)) {
+      nodes.push(current)
+    }
+
+    if (Array.isArray(current)) {
+      for (const item of current) {
+        queue.push(item)
+      }
+      continue
+    }
+
+    for (const value of Object.values(current)) {
+      queue.push(value)
+    }
+  }
+
+  if (nodes.length === 0 && typeof root === 'object') {
+    nodes.push(root)
+  }
+
+  return nodes
+}
+
+function isMediaLikeNode(node: any): boolean {
+  if (!node || typeof node !== 'object') {
+    return false
+  }
+
+  return Boolean(
+    node.video
+    || node.images
+    || node.image_post_info
+    || node.imagePostInfo
+    || node.photos
+    || node.photo
+    || node.aweme_detail
+    || node.awemeDetail
+  )
+}
+
+function extractVideoUrls(node: any): string[] {
+  const urls: string[] = []
+
+  const addUrl = (value: unknown): void => {
+    const normalized = normalizeResourceUrl(value)
+    if (!normalized || IMAGE_SUFFIX_RE.test(normalized) || !/^https?:\/\//i.test(normalized)) {
+      return
+    }
+
+    urls.push(normalizePlayUrl(normalized))
+  }
+
+  const addUrlList = (value: unknown): void => {
+    if (!Array.isArray(value)) {
+      addUrl(value)
+      return
+    }
+
+    for (const item of value) {
+      addUrl(item)
+    }
+  }
+
+  addUrlList(getPath(node, ['video', 'play_addr', 'url_list']))
+  addUrlList(getPath(node, ['video', 'playAddr', 'url_list']))
+  addUrlList(getPath(node, ['video', 'play_addr_h264', 'url_list']))
+  addUrlList(getPath(node, ['video', 'playAddrH264', 'url_list']))
+  addUrlList(getPath(node, ['video', 'download_addr', 'url_list']))
+  addUrlList(getPath(node, ['video', 'downloadAddr', 'url_list']))
+  addUrlList(getPath(node, ['video', 'url_list']))
+
+  addUrl(node?.video_url)
+  addUrl(node?.nwm_video_url)
+  addUrl(node?.nwm_video_url_HQ)
+  addUrl(node?.wm_video_url)
+  addUrl(node?.play)
+  addUrl(node?.play_url)
+
+  const bitRate = getPath(node, ['video', 'bit_rate'])
+  if (Array.isArray(bitRate)) {
+    for (const item of bitRate) {
+      addUrlList(item?.play_addr?.url_list)
+      addUrlList(item?.playAddr?.url_list)
+      addUrlList(item?.play_addr_265?.url_list)
+      addUrlList(item?.playAddr265?.url_list)
+      addUrl(item?.url)
+    }
+  }
+
+  const videoNode = node?.video
+  if (videoNode && typeof videoNode === 'object') {
+    for (const nestedUrl of collectHttpUrls(videoNode, 64)) {
+      addUrl(nestedUrl)
+    }
+  }
+
+  return dedupe(urls)
+}
+
+function extractImageUrls(node: any, maxImages: number): string[] {
+  const urls: string[] = []
+  const add = (value: unknown): void => {
+    const normalized = normalizeResourceUrl(value)
+    if (normalized && /^https?:\/\//i.test(normalized)) {
+      urls.push(normalized)
+    }
+  }
+
+  const imageArrays = [
+    node?.images,
+    node?.image_post_info?.images,
+    node?.imagePostInfo?.images,
+    node?.image_post_info?.image_list,
+    node?.photos,
   ]
 
-  let lastError: unknown
+  for (const list of imageArrays) {
+    if (!Array.isArray(list)) {
+      continue
+    }
 
-  for (const endpoint of endpoints) {
-    try {
-      const data = await fetchJson(ctx, endpoint, config)
-      const aweme = data?.item_list?.[0] || data?.aweme_detail
-      if (!aweme) {
-        throw new Error('aweme not found')
+    for (const item of list) {
+      if (typeof item === 'string') {
+        add(item)
+        continue
       }
-      return pickMediaFromAweme(aweme, awemeId, config)
-    } catch (error) {
-      lastError = error
-      logger.debug(`douyin endpoint failed: ${endpoint} ${String((error as Error)?.message || error)}`)
+
+      add(item?.url)
+      add(item?.image_url)
+      add(item?.display_image?.url_list?.[0])
+      add(item?.origin_image?.url_list?.[0])
+      add(item?.download_url?.url_list?.[0])
+      add(item?.url_list?.[0])
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error('抖音解析失败')
+  return dedupe(urls).slice(0, Math.max(1, maxImages || 1))
 }
 
-async function fetchJson(ctx: Context, url: string, config: Config): Promise<any> {
-  const text = await requestText(ctx, url, config.timeoutMs, {
-    referer: 'https://www.douyin.com/',
+function extractTitle(node: any, inputUrl: string): string {
+  return pickString(
+    node?.desc,
+    node?.title,
+    node?.video_title,
+    node?.aweme_detail?.desc,
+    node?.aweme_detail?.title,
+    inputUrl
+  )
+}
+
+function extractMusicUrl(node: any): string | undefined {
+  const value = pickString(
+    node?.music?.play_url?.url_list?.[0],
+    node?.music?.playUrl?.url_list?.[0],
+    node?.music?.play_url,
+    node?.music?.playUrl,
+    node?.music_url,
+    node?.audio?.url,
+    node?.audio_url
+  )
+
+  return value || undefined
+}
+
+async function fetchJson(ctx: Context, url: string, timeoutMs: number): Promise<any> {
+  const text = await requestText(ctx, url, timeoutMs, {
     accept: 'application/json,text/plain,*/*',
   })
 
@@ -150,189 +397,20 @@ async function fetchJson(ctx: Context, url: string, config: Config): Promise<any
   }
 }
 
-function pickMediaFromAweme(aweme: any, awemeId: string, config: Config): DouyinMedia {
-  const title = (aweme?.desc || '').trim() || `douyin:${awemeId}`
-  const musicUrl =
-    aweme?.music?.play_url?.url_list?.[0]
-    || aweme?.music?.playUrl?.url_list?.[0]
-    || aweme?.music?.playUrl
-    || aweme?.music?.play_url
-
-  if (config.douyin.parseMode !== 'video-only') {
-    const imagePost = aweme?.image_post_info?.images
-    const images = Array.isArray(aweme?.images)
-      ? aweme.images
-      : Array.isArray(imagePost)
-        ? imagePost
-        : null
-
-    if (images?.length) {
-      const urls = images
-        .map((item: any) => item?.url_list?.[0] || item?.display_image?.url_list?.[0])
-        .filter(Boolean)
-        .slice(0, config.douyin.maxImages)
-
-      if (urls.length) {
-        return {
-          kind: 'images',
-          title,
-          urls,
-          musicUrl: typeof musicUrl === 'string' ? musicUrl : undefined,
-        }
-      }
-    }
+function collectHttpUrls(root: unknown, maxCount: number): string[] {
+  if (!root || typeof root !== 'object') {
+    return []
   }
 
-  const playUrl = aweme?.video?.play_addr?.url_list?.[0] || aweme?.video?.play_addr?.url_list?.[1]
-  if (!playUrl) {
-    throw new DouyinSkipError('该抖音链接不是视频作品（没有可用的视频地址）。')
-  }
-
-  return {
-    kind: 'video',
-    title,
-    url: normalizePlayUrl(playUrl),
-    musicUrl: typeof musicUrl === 'string' ? musicUrl : undefined,
-  }
-}
-
-async function fetchDouyinMediaViaPuppeteer(
-  ctx: Context,
-  pageUrl: string,
-  awemeId: string,
-  config: Config,
-  logger: Logger
-): Promise<DouyinMedia> {
-  const puppeteerService = (ctx as any).puppeteer
-  if (!puppeteerService) {
-    throw new Error('puppeteer service not available')
-  }
-
-  const page = await puppeteerService.page()
-  const candidates: any[] = []
-
-  const onResponse = async (response: any): Promise<void> => {
-    try {
-      const url = typeof response.url === 'function' ? response.url() : response.url
-      if (!url || typeof url !== 'string') {
-        return
-      }
-
-      if (!/(douyin\.com|iesdouyin\.com)/.test(url)) {
-        return
-      }
-
-      if (!/(aweme|note|item|detail|feed|web\/api|api)/.test(url)) {
-        return
-      }
-
-      const text = await response.text()
-      if (!text) {
-        return
-      }
-
-      const data = safeJsonParse(text)
-      if (!data) {
-        return
-      }
-
-      const aweme = data?.item_list?.[0] || data?.aweme_detail || findAweme(data, awemeId)
-      if (aweme) {
-        candidates.push(aweme)
-      }
-    } catch {
-      // ignore network parsing errors
-    }
-  }
-
-  page.on('response', onResponse)
-
-  try {
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-    await page.setExtraHTTPHeaders({
-      referer: 'https://www.douyin.com/',
-      'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    })
-
-    const aweme = await probeAwemeFromPage(page, pageUrl, awemeId, candidates, config.douyin.puppeteerTimeoutMs)
-      || await probeAwemeFromPage(
-        page,
-        `https://www.iesdouyin.com/share/video/${awemeId}`,
-        awemeId,
-        candidates,
-        config.douyin.puppeteerTimeoutMs
-      )
-
-    if (!aweme) {
-      throw new Error('puppeteer: aweme not found')
-    }
-
-    return pickMediaFromAweme(aweme, awemeId, config)
-  } catch (error) {
-    logger.debug(`puppeteer fallback failed: ${String((error as Error)?.message || error)}`)
-    throw error
-  } finally {
-    page.off('response', onResponse)
-    try {
-      await page.close()
-    } catch {
-      // noop
-    }
-  }
-}
-
-async function probeAwemeFromPage(
-  page: any,
-  targetUrl: string,
-  awemeId: string,
-  candidates: any[],
-  timeoutMs: number
-): Promise<any | null> {
-  candidates.length = 0
-  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await sleep(4_000)
-
-  const fromResponses = candidates.find((item) => String(item?.aweme_id || item?.awemeId || '') === String(awemeId)) || candidates[0]
-  if (fromResponses) {
-    return fromResponses
-  }
-
-  const html = await page.content()
-  if (!html || typeof html !== 'string') {
-    return null
-  }
-
-  const renderData = extractScriptText(html, 'RENDER_DATA')
-  const sigiState = extractScriptText(html, 'SIGI_STATE')
-  const nextData = extractScriptText(html, '__NEXT_DATA__')
-
-  const states = [
-    renderData ? decodeMaybeEncodedJson(renderData) : null,
-    sigiState ? safeJsonParse(sigiState) : null,
-    nextData ? safeJsonParse(nextData) : null,
-  ].filter(Boolean)
-
-  for (const state of states) {
-    const found = findAweme(state, awemeId)
-    if (found) {
-      return found
-    }
-  }
-
-  return null
-}
-
-function findAweme(root: any, awemeId: string): any | null {
-  const target = String(awemeId)
-  const visited = new Set<any>()
-  const stack: any[] = [root]
-  const idKeys = ['aweme_id', 'awemeId', 'id', 'item_id', 'itemId', 'note_id', 'noteId']
-
+  const urls: string[] = []
+  const visited = new Set<unknown>()
+  const stack: unknown[] = [root]
   let steps = 0
-  while (stack.length) {
+
+  while (stack.length > 0 && urls.length < maxCount) {
     const current = stack.pop()
     steps += 1
-    if (steps > 1_000_000) {
+    if (steps > 10_000) {
       break
     }
 
@@ -341,9 +419,8 @@ function findAweme(root: any, awemeId: string): any | null {
     }
 
     if (typeof current === 'string') {
-      const nested = decodeMaybeEncodedJson(current) || safeJsonParse(current)
-      if (nested) {
-        stack.push(nested)
+      if (/^https?:\/\//i.test(current)) {
+        urls.push(current)
       }
       continue
     }
@@ -357,79 +434,143 @@ function findAweme(root: any, awemeId: string): any | null {
     }
     visited.add(current)
 
-    for (const key of idKeys) {
-      const value = (current as any)[key]
-      if (value != null && String(value) === target) {
-        return current
-      }
-    }
-
-    const itemStruct = (current as any).itemStruct
-    if (itemStruct?.video || itemStruct?.images || itemStruct?.image_post_info) {
-      return itemStruct
-    }
-
-    const awemeDetail = (current as any).aweme_detail
-    if (awemeDetail?.video || awemeDetail?.images || awemeDetail?.image_post_info) {
-      return awemeDetail
-    }
-
     if (Array.isArray(current)) {
       for (const item of current) {
         stack.push(item)
       }
-    } else {
-      for (const value of Object.values(current)) {
-        stack.push(value)
-      }
+      continue
+    }
+
+    for (const value of Object.values(current)) {
+      stack.push(value)
     }
   }
 
-  return null
+  return dedupe(urls)
 }
 
-function extractScriptText(html: string, id: string): string | null {
-  const re = new RegExp(`<script[^>]*id=["']${id}["'][^>]*>([\\s\\S]*?)<\\/script>`, 'i')
-  const match = re.exec(html)
-  return match?.[1] ?? null
+function getPath(source: any, path: Array<string | number>): unknown {
+  let cursor = source
+  for (const key of path) {
+    if (!cursor || typeof cursor !== 'object') {
+      return null
+    }
+    cursor = cursor[key as keyof typeof cursor]
+  }
+
+  return cursor
 }
 
-function decodeMaybeEncodedJson(raw: string): any | null {
-  const text = raw.trim()
+function normalizePlayUrl(url: string): string {
+  return url.replace('/playwm/', '/play/')
+}
+
+function normalizeApiBaseUrl(input: string): string {
+  const trimmed = input.trim()
+  if (!trimmed) {
+    return 'https://api.douyin.wtf'
+  }
+
+  return trimmed.replace(/\/+$/, '')
+}
+
+function buildApiBaseCandidates(primary: string, extras: string[] | undefined): string[] {
+  const candidates = [primary, ...(extras || [])]
+
+  if (primary.includes('api.douyin.wtf')) {
+    candidates.push(primary.replace('api.douyin.wtf', 'douyin.wtf'))
+  }
+
+  if (primary.includes('douyin.wtf') && !primary.includes('api.douyin.wtf')) {
+    candidates.push(primary.replace('douyin.wtf', 'api.douyin.wtf'))
+  }
+
+  return dedupe(candidates.map((item) => normalizeApiBaseUrl(item)))
+}
+
+function normalizeResourceUrl(value: unknown): string {
+  if (typeof value !== 'string') {
+    return ''
+  }
+
+  const text = value.trim()
   if (!text) {
-    return null
+    return ''
   }
 
-  const direct = safeJsonParse(text)
-  if (direct) {
-    return direct
+  if (text.startsWith('//')) {
+    return `https:${text}`
   }
 
-  if (!/%7B|%5B/i.test(text)) {
-    return null
-  }
-
-  try {
-    return safeJsonParse(decodeURIComponent(text))
-  } catch {
-    return null
-  }
+  return text
 }
 
-function safeJsonParse(text: string): any | null {
-  const payload = text.trim()
-  if (!payload) {
-    return null
+function pickString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value !== 'string') {
+      continue
+    }
+
+    const trimmed = value.trim()
+    if (trimmed) {
+      return trimmed
+    }
   }
 
-  if (!(payload.startsWith('{') || payload.startsWith('['))) {
-    return null
+  return ''
+}
+
+function dedupe(list: string[]): string[] {
+  return Array.from(new Set(list))
+}
+
+function toNumber(value: unknown): number {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? number : 0
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function extractRemoteError(payload: any): string {
+  const detailCode = toNumber(payload?.detail?.code)
+  const message = pickString(
+    payload?.message,
+    payload?.detail?.message,
+    payload?.detail,
+    payload?.error,
+    payload?.msg
+  )
+
+  if (detailCode > 0 && message) {
+    return `${message} (detail.code=${detailCode})`
+  }
+
+  if (detailCode > 0) {
+    return `detail.code=${detailCode}`
+  }
+
+  return message
+}
+
+function trimForDebug(value: unknown): unknown {
+  if (value == null) {
+    return value
   }
 
   try {
-    return JSON.parse(payload)
+    const text = JSON.stringify(value)
+    if (text.length <= 1000) {
+      return value
+    }
+
+    return {
+      preview: `${text.slice(0, 1000)}...`,
+      size: text.length,
+    }
   } catch {
-    return null
+    return '[unserializable]'
   }
 }
 

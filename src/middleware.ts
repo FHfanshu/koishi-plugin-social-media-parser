@@ -3,9 +3,8 @@ import type { Context } from 'koishi'
 import type { Config } from './config'
 import { injectParsedContext } from './context'
 import { parseSocialUrl } from './parse'
-import { DouyinSkipError } from './parsers/douyin'
 import { sendParsedContent } from './utils/media'
-import { extractSocialUrlsFromSession, isWhitelisted } from './utils/url'
+import { extractSocialUrlsFromSession, isBlocked } from './utils/url'
 
 const COOLDOWN_MIN_TTL_MS = 60_000
 const COOLDOWN_MAX_ENTRIES = 5_000
@@ -32,28 +31,60 @@ export function registerAutoParseMiddleware(
 
     const urls = extractSocialUrlsFromSession(session)
     if (!urls.length) {
+      if (config.debug) {
+        const preview = typeof session.content === 'string' ? session.content.slice(0, 180) : ''
+        const raw = typeof session.content === 'string' ? session.content : ''
+        if (/(douyin|iesdouyin|xiaohongshu|xhslink|bilibili|b23\.tv|twitter|x\.com|t\.co|fxtwitter|vxtwitter)/i.test(raw)) {
+          logger.info(`auto parse skipped: no social url detected, channel=${session.channelId || 'unknown'}, preview=${preview}`)
+        }
+      }
       return next()
     }
 
     cleanupCooldownMap(cooldownMap, Date.now(), config.cooldownMs)
 
-    if (!isWhitelisted(session, config.autoParse.guilds, config.autoParse.users)) {
+    if (isBlocked(session, config.autoParse.blockedGuilds, config.autoParse.blockedUsers)) {
+      if (config.debug) {
+        logger.info(`auto parse blocked by blacklist: guild=${session.guildId || ''}, channel=${session.channelId || ''}, user=${session.userId || ''}`)
+      }
       return next()
     }
 
     const limited = urls.slice(0, config.autoParse.maxUrlsPerMessage)
 
+    // Track resolved URLs to avoid sending duplicate content when the same
+    // note is referenced by multiple URL variants (e.g. short link + full URL).
+    const resolvedSet = new Set<string>()
+
     for (const url of limited) {
       const cooldownKey = `${session.channelId || session.guildId || session.userId}:${url}`
       const lastTime = cooldownMap.get(cooldownKey) ?? 0
       if (Date.now() - lastTime < config.cooldownMs) {
+        if (config.debug) {
+          logger.info(`auto parse cooldown hit: ${url}`)
+        }
         continue
       }
 
       cooldownMap.set(cooldownKey, Date.now())
+      if (config.debug) {
+        logger.info(`auto parse start: ${url}`)
+      }
 
       try {
         const parsed = await parseSocialUrl(ctx, url, config, logger)
+
+        // Deduplicate by resolved URL — different input URLs can resolve to
+        // the same canonical page (short link, app card, text link, etc.).
+        const resolvedKey = parsed.resolvedUrl || parsed.originalUrl
+        if (resolvedSet.has(resolvedKey)) {
+          if (config.debug) {
+            logger.info(`auto parse skipped duplicate resolved url: ${resolvedKey} (from ${url})`)
+          }
+          continue
+        }
+        resolvedSet.add(resolvedKey)
+
         await sendParsedContent(ctx, session, parsed, config, logger)
 
         if (config.autoParse.injectContext) {
@@ -73,13 +104,6 @@ export function registerAutoParseMiddleware(
           )
         }
       } catch (error) {
-        if (error instanceof DouyinSkipError) {
-          if (config.douyin.notifyOnSkip) {
-            await session.send(error.message)
-          }
-          continue
-        }
-
         const message = (error as Error)?.message || String(error)
         logger.warn(`auto parse failed: ${message}`)
         if (config.debug) {

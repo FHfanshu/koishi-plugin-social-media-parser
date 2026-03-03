@@ -40,19 +40,50 @@ export async function sendParsedContent(
       || parsed.images.length >= config.forward.imageMergeThreshold
     )
 
+  const mediaFileCount = parsed.images.length + parsed.videos.length + (config.forward.includeMusic && parsed.musicUrl ? 1 : 0)
+  const shouldForwardByMediaCount =
+    isOneBot
+    && config.forward.enabled
+    && config.forward.autoMergeForward
+    && mediaFileCount > 1
+
   if (parsed.videos.length > 0) {
     const primaryVideo = parsed.videos[0]
-    const videoElement = await buildVideoElement(ctx, primaryVideo, config, logger)
+    const videoElement = await buildVideoElement(ctx, primaryVideo, parsed, config, logger)
 
     if (!videoElement) {
       logger.info(`video unavailable or skipped, fallback to image/text: ${primaryVideo}`)
     } else {
-      if (shouldAutoForward) {
+      const shouldForwardVideo = shouldAutoForward || shouldForwardByMediaCount
+      if (shouldForwardVideo) {
         const nodes = createForwardTextNodes(intro, session, config)
         if (nodes.length < config.forward.maxForwardNodes) {
           nodes.push(h('message', { nickname: config.forward.nickname, userId: session.selfId }, videoElement))
         }
-        await sendForwardNodes(session, nodes, config, logger)
+
+        if (parsed.images.length > 0) {
+          const imageSegments = await buildImageSegments(ctx, parsed.images, config, logger)
+          for (const image of imageSegments) {
+            if (nodes.length >= config.forward.maxForwardNodes) {
+              break
+            }
+            nodes.push(h('message', { nickname: config.forward.nickname, userId: session.selfId }, image))
+          }
+        }
+
+        if (config.forward.includeMusic && parsed.musicUrl && nodes.length < config.forward.maxForwardNodes) {
+          nodes.push(
+            h('message', { nickname: config.forward.nickname, userId: session.selfId }, [
+              '背景音乐：',
+              h('audio', { src: parsed.musicUrl }),
+            ])
+          )
+        }
+
+        const forwarded = await sendForwardNodes(session, nodes, config, logger)
+        if (!forwarded) {
+          await sendVideoPlainFallback(ctx, session, intro, videoElement, parsed, config, logger)
+        }
       } else {
         await session.send(h.text(intro))
         await session.send(videoElement)
@@ -67,7 +98,7 @@ export async function sendParsedContent(
     const shouldForwardImages =
       isOneBot
       && config.forward.enabled
-      && (shouldAutoForward || parsed.images.length >= config.forward.imageMergeThreshold)
+      && (shouldAutoForward || shouldForwardByMediaCount || parsed.images.length >= config.forward.imageMergeThreshold)
 
     if (shouldForwardImages) {
       const nodes = createForwardTextNodes(intro, session, config)
@@ -88,18 +119,13 @@ export async function sendParsedContent(
         )
       }
 
-      await sendForwardNodes(session, nodes, config, logger)
-      return
+      const forwarded = await sendForwardNodes(session, nodes, config, logger)
+      if (forwarded) {
+        return
+      }
     }
 
-    await session.send(h.text(intro))
-    if (imageSegments.length) {
-      await session.send(imageSegments)
-    }
-
-    if (config.forward.includeMusic && parsed.musicUrl) {
-      await session.send(h('audio', { src: parsed.musicUrl }))
-    }
+    await sendImagesPlain(session, intro, imageSegments, parsed.musicUrl, config)
     return
   }
 
@@ -109,6 +135,7 @@ export async function sendParsedContent(
 async function buildVideoElement(
   ctx: Context,
   url: string,
+  parsed: ParsedContent,
   config: Config,
   logger: Logger
 ): Promise<any> {
@@ -117,12 +144,17 @@ async function buildVideoElement(
     return null
   }
 
+  const hasStorage = hasStorageService(ctx)
+  const knownDurationSec = Number.isFinite(parsed.videoDurationSec)
+    ? Number(parsed.videoDurationSec)
+    : null
+  const allowUnknownDuration = parsed.platform === 'bilibili' && config.fallbackToUrlOnError
   let downloaded: DownloadedBuffer | null = null
   try {
-    if (config.sendMode === 'url') {
+    if (config.sendMode === 'url' && !hasStorage) {
       if (config.maxVideoDurationSec && config.maxVideoDurationSec > 0) {
         downloaded = await downloadVideoForSend(ctx, url, config)
-        if (!await isDurationAllowed(downloaded, url, config, logger)) {
+        if (!await isDurationAllowed(downloaded, url, config, logger, knownDurationSec, allowUnknownDuration)) {
           return null
         }
       }
@@ -131,8 +163,22 @@ async function buildVideoElement(
     }
 
     downloaded = await downloadVideoForSend(ctx, url, config)
-    if (!await isDurationAllowed(downloaded, url, config, logger)) {
+    if (!await isDurationAllowed(downloaded, url, config, logger, knownDurationSec, allowUnknownDuration)) {
       return null
+    }
+
+    if (hasStorage) {
+      if (config.sendMode === 'url') {
+        const storedUrl = await toMediaUrl(ctx, downloaded.mimeType || 'video/mp4', downloaded.buffer, 'send_video', logger)
+        return buildVideoSegmentFromMediaUrl(storedUrl, downloaded.buffer)
+      }
+
+      const optimized = await optimizeVideoBeforeSend(downloaded.buffer, downloaded.mimeType || 'video/mp4', config, logger)
+      const finalBuffer = optimized?.buffer || downloaded.buffer
+      const finalMime = optimized?.mimeType || downloaded.mimeType || 'video/mp4'
+
+      const storedUrl = await toMediaUrl(ctx, finalMime, finalBuffer, 'send_video', logger)
+      return buildVideoSegmentFromMediaUrl(storedUrl, finalBuffer)
     }
 
     const optimized = await optimizeVideoBeforeSend(downloaded.buffer, downloaded.mimeType || 'video/mp4', config, logger)
@@ -162,11 +208,9 @@ async function buildVideoElement(
     if (config.maxVideoDurationSec && config.maxVideoDurationSec > 0) {
       const payload = downloaded || await downloadVideoForSend(ctx, url, config).catch(() => null)
       if (!payload) {
-        logger.info(`video fallback skipped: unable to verify duration, url=${url}`)
-        return null
-      }
-
-      if (!await isDurationAllowed(payload, url, config, logger)) {
+        logger.warn(`video fallback: unable to verify duration (download failed), proceeding with url fallback, url=${url}`)
+        // Do NOT return null here — fall through to segment.video(url)
+      } else if (!await isDurationAllowed(payload, url, config, logger, knownDurationSec, allowUnknownDuration)) {
         return null
       }
     }
@@ -178,6 +222,24 @@ async function buildVideoElement(
 
     return segment.video(url)
   }
+}
+
+function buildVideoSegmentFromMediaUrl(mediaUrl: string, buffer: Buffer): any {
+  if (mediaUrl.startsWith('http://') || mediaUrl.startsWith('https://')) {
+    return segment.video(mediaUrl)
+  }
+
+  if (mediaUrl.startsWith('base64://')) {
+    return segment.video(mediaUrl)
+  }
+
+  const base64 = buffer.toString('base64')
+  return segment.video(`base64://${base64}`)
+}
+
+function hasStorageService(ctx: Context): boolean {
+  const storage = (ctx as any).chatluna_storage
+  return Boolean(storage?.createTempFile)
 }
 
 async function downloadVideoForSend(ctx: Context, url: string, config: Config): Promise<DownloadedBuffer> {
@@ -209,15 +271,28 @@ async function isDurationAllowed(
   downloaded: DownloadedBuffer,
   url: string,
   config: Config,
-  logger: Logger
+  logger: Logger,
+  knownDurationSec: number | null,
+  allowUnknownDuration: boolean
 ): Promise<boolean> {
   if (!config.maxVideoDurationSec || config.maxVideoDurationSec <= 0) {
     return true
   }
 
-  const ffmpegTimeoutMs = config.autoParse?.mediaInject?.ffmpegTimeoutMs ?? 30_000
-  const durationSec = await probeVideoDuration(downloaded.buffer, downloaded.mimeType || 'video/mp4', ffmpegTimeoutMs)
+  const durationSec = knownDurationSec && knownDurationSec > 0
+    ? knownDurationSec
+    : await probeVideoDuration(
+      downloaded.buffer,
+      downloaded.mimeType || 'video/mp4',
+      config.autoParse?.mediaInject?.ffmpegTimeoutMs ?? 30_000
+    )
+
   if (durationSec == null) {
+    if (allowUnknownDuration) {
+      logger.warn(`video duration probe failed, allow unknown duration fallback: ${url}`)
+      return true
+    }
+
     logger.warn(`video send skipped: duration probe failed, url=${url}`)
     return false
   }
@@ -318,23 +393,60 @@ async function sendForwardNodes(
   nodes: any[],
   config: Config,
   logger: Logger
-): Promise<void> {
+): Promise<boolean> {
   if (!nodes.length) {
-    return
+    return false
   }
 
   const safeNodes = nodes.slice(0, config.forward.maxForwardNodes)
 
   try {
     await session.send(h('message', { forward: true }, safeNodes))
+    return true
   } catch (error) {
     logger.debug(`forward send failed: ${String((error as Error)?.message || error)}`)
-    for (const node of safeNodes) {
-      const content = (node as any)?.children?.[0] ?? node
-      if (content) {
-        await session.send(content)
-      }
+    return false
+  }
+}
+
+async function sendVideoPlainFallback(
+  ctx: Context,
+  session: Session,
+  intro: string,
+  videoElement: any,
+  parsed: ParsedContent,
+  config: Config,
+  logger: Logger
+): Promise<void> {
+  await session.send(h.text(intro))
+  await session.send(videoElement)
+
+  if (parsed.images.length > 0) {
+    const imageSegments = await buildImageSegments(ctx, parsed.images, config, logger)
+    if (imageSegments.length) {
+      await session.send(imageSegments)
     }
+  }
+
+  if (config.forward.includeMusic && parsed.musicUrl) {
+    await session.send(h('audio', { src: parsed.musicUrl }))
+  }
+}
+
+async function sendImagesPlain(
+  session: Session,
+  intro: string,
+  imageSegments: any[],
+  musicUrl: string | undefined,
+  config: Config
+): Promise<void> {
+  await session.send(h.text(intro))
+  if (imageSegments.length) {
+    await session.send(imageSegments)
+  }
+
+  if (config.forward.includeMusic && musicUrl) {
+    await session.send(h('audio', { src: musicUrl }))
   }
 }
 

@@ -22,11 +22,9 @@ export interface MediaInjectConfig {
 
 export interface DouyinConfig {
   enabled: boolean
-  parseMode: 'video-only' | 'video+images'
-  notifyOnSkip: boolean
+  apiBaseUrl: string
+  fallbackApiBaseUrls: string[]
   maxImages: number
-  puppeteerFallback: boolean
-  puppeteerTimeoutMs: number
 }
 
 export interface XiaohongshuConfig {
@@ -42,6 +40,14 @@ export interface BilibiliConfig {
   maxDescLength: number
 }
 
+export interface TwitterConfig {
+  enabled: boolean
+  rapidApiKey: string
+  rapidApiHost: string
+  endpointPath: string
+  maxImages: number
+}
+
 export interface ForwardConfig {
   enabled: boolean
   nickname: string
@@ -55,8 +61,8 @@ export interface ForwardConfig {
 
 export interface AutoParseConfig {
   enabled: boolean
-  guilds: string[]
-  users: string[]
+  blockedGuilds: string[]
+  blockedUsers: string[]
   maxUrlsPerMessage: number
   injectContext: boolean
   injectMedia: boolean
@@ -88,6 +94,7 @@ export interface Config {
   douyin: DouyinConfig
   xiaohongshu: XiaohongshuConfig
   bilibili: BilibiliConfig
+  twitter: TwitterConfig
   forward: ForwardConfig
   autoParse: AutoParseConfig
   tool: ToolConfig
@@ -130,11 +137,9 @@ export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     douyin: Schema.object({
       enabled: Schema.boolean().default(true).description('启用抖音解析'),
-      parseMode: Schema.union(['video-only', 'video+images']).default('video-only').description('解析模式'),
-      notifyOnSkip: Schema.boolean().default(true).description('仅视频模式遇到图文时提示'),
+      apiBaseUrl: Schema.string().default('https://api.douyin.wtf').description('Douyin_TikTok_Download_API 地址'),
+      fallbackApiBaseUrls: Schema.array(String).role('table').default([]).description('抖音解析备用 API 地址列表（按顺序回退）'),
       maxImages: Schema.number().default(9).min(1).max(20).description('图文最多保留图片数量'),
-      puppeteerFallback: Schema.boolean().default(true).description('接口失败时启用 Puppeteer 回退'),
-      puppeteerTimeoutMs: Schema.number().default(20_000).description('Puppeteer 回退超时（毫秒）'),
     }).description('抖音解析设置'),
     xiaohongshu: Schema.object({
       enabled: Schema.boolean().default(true).description('启用小红书解析'),
@@ -147,6 +152,13 @@ export const Config: Schema<Config> = Schema.intersect([
       fetchVideo: Schema.boolean().default(true).description('尝试获取视频直链（第三方 API，可能不稳定）'),
       maxDescLength: Schema.number().default(100).min(20).max(500).description('视频简介最大字符数'),
     }).description('Bilibili 解析设置'),
+    twitter: Schema.object({
+      enabled: Schema.boolean().default(false).description('启用 Twitter/X 解析（RapidAPI）'),
+      rapidApiKey: Schema.string().role('secret').default('').description('RapidAPI Key（X-RapidAPI-Key）'),
+      rapidApiHost: Schema.string().default('twitter-x-video-downloader-api.p.rapidapi.com').description('RapidAPI Host（X-RapidAPI-Host）'),
+      endpointPath: Schema.string().default('/download').description('RapidAPI 端点路径（如 /download）'),
+      maxImages: Schema.number().default(9).min(1).max(20).description('图片推文最多保留图片数量'),
+    }).description('Twitter/X 解析设置'),
     forward: Schema.object({
       enabled: Schema.boolean().default(true).description('图片内容优先使用合并转发（OneBot）'),
       nickname: Schema.string().default('内容解析').description('合并转发显示昵称'),
@@ -161,8 +173,8 @@ export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     autoParse: Schema.object({
       enabled: Schema.boolean().default(true).description('启用自动解析中间件'),
-      guilds: Schema.array(String).role('table').default([]).description('自动解析 guild 白名单（支持 platform:guildId）'),
-      users: Schema.array(String).role('table').default([]).description('自动解析 user 白名单（支持 platform:userId）'),
+      blockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（支持 platform:guildId）'),
+      blockedUsers: Schema.array(String).role('table').default([]).description('自动解析 user 黑名单（支持 platform:userId）'),
       maxUrlsPerMessage: Schema.number().default(3).min(1).max(10).description('单条消息最多解析链接数量'),
       injectContext: Schema.boolean().default(true).description('自动解析后静默注入 ChatLuna 上下文'),
       injectMedia: Schema.boolean().default(true).description('自动解析时注入压缩媒体（图片/视频）'),
