@@ -25,6 +25,7 @@ const DOUYIN_HOST_RE = /(^|\.)((v\.douyin\.com)|(www\.douyin\.com)|(www\.iesdouy
 const XIAOHONGSHU_HOST_RE = /(^|\.)((xiaohongshu\.com)|(xhslink\.com))$/i
 const BILIBILI_HOST_RE = /(^|\.)((bilibili\.com)|(b23\.tv)|(bili22\.cn)|(bili23\.cn)|(bili33\.cn)|(bili2233\.cn))$/i
 const TWITTER_HOST_RE = /(^|\.)((x\.com)|(twitter\.com)|(mobile\.x\.com)|(mobile\.twitter\.com)|(m\.twitter\.com)|(t\.co)|(fxtwitter\.com)|(vxtwitter\.com))$/i
+const YOUTUBE_HOST_RE = /(^|\.)((youtube\.com)|(youtu\.be)|(m\.youtube\.com)|(music\.youtube\.com))$/i
 
 export function decodeHtmlEntities(value: string): string {
   if (!value || !value.includes('&')) {
@@ -133,6 +134,9 @@ export function detectPlatformByUrl(input: string): SocialPlatform | null {
   }
   if (TWITTER_HOST_RE.test(host)) {
     return 'twitter'
+  }
+  if (YOUTUBE_HOST_RE.test(host)) {
+    return 'youtube'
   }
 
   return null
@@ -363,6 +367,13 @@ function canonicalUrlKey(url: string): string {
       const avMatch = path.match(/\/av(\d+)/i)
       if (avMatch?.[1]) {
         return `bili:av${avMatch[1]}`
+      }
+    }
+
+    if (YOUTUBE_HOST_RE.test(host)) {
+      const videoId = parsed.searchParams.get('v') || path.match(/^\/([a-zA-Z0-9_-]{8,16})$/)?.[1]
+      if (videoId) {
+        return `youtube:${videoId}`
       }
     }
 

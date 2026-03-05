@@ -22,7 +22,11 @@ export async function sendParsedContent(
     ? '抖音'
     : parsed.platform === 'bilibili'
       ? '哔哩哔哩'
-      : '小红书'
+      : parsed.platform === 'twitter'
+        ? 'Twitter/X'
+      : parsed.platform === 'youtube'
+        ? 'YouTube'
+        : '小红书'
   const textBody = parsed.content?.trim() ? truncateText(parsed.content.trim(), 350) : ''
 
   const intro = [
@@ -129,6 +133,20 @@ export async function sendParsedContent(
     return
   }
 
+  const shouldForwardTextOnly =
+    isOneBot
+    && config.forward.enabled
+    && config.forward.autoMergeForward
+    && (intro.length >= config.forward.longTextThreshold || shouldForwardByMediaCount)
+
+  if (shouldForwardTextOnly) {
+    const nodes = createForwardTextNodes(intro, session, config)
+    const forwarded = await sendForwardNodes(session, nodes, config, logger)
+    if (forwarded) {
+      return
+    }
+  }
+
   await session.send(h.text(intro))
 }
 
@@ -148,7 +166,9 @@ async function buildVideoElement(
   const knownDurationSec = Number.isFinite(parsed.videoDurationSec)
     ? Number(parsed.videoDurationSec)
     : null
-  const allowUnknownDuration = parsed.platform === 'bilibili' && config.fallbackToUrlOnError
+  const allowUnknownDuration =
+    (parsed.platform === 'bilibili' || parsed.platform === 'douyin')
+    && config.fallbackToUrlOnError
   let downloaded: DownloadedBuffer | null = null
   try {
     if (config.sendMode === 'url' && !hasStorage) {
@@ -478,6 +498,9 @@ function inferMediaReferer(url: string): string {
     }
     if (host.includes('bilibili.com') || host.includes('bilivideo.')) {
       return 'https://www.bilibili.com/'
+    }
+    if (host.includes('youtube.com') || host.includes('youtu.be') || host.includes('googlevideo.com')) {
+      return 'https://www.youtube.com/'
     }
   } catch {
     // ignore

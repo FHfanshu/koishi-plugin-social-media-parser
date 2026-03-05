@@ -1,3 +1,5 @@
+import path from 'node:path'
+
 import type { Context } from 'koishi'
 
 import { Config } from './config'
@@ -10,13 +12,13 @@ export const name = 'social-media-parser'
 
 export const inject = {
   required: ['http'],
-  optional: ['chatluna', 'chatluna_character', 'chatluna_storage'],
+  optional: ['chatluna', 'chatluna_character', 'chatluna_storage', 'console'],
 } as const
 
 export const usage = `
 ## Social Media Parser
 
-抖音 + 小红书 + 哔哩哔哩 + Twitter(X) 四合一解析插件，支持：
+抖音 + 小红书 + 哔哩哔哩 + Twitter(X) + YouTube 五合一解析插件，支持：
 - 自动解析（guild 黑名单）
 - 手动命令：\`parse <url>\`
 - ChatLuna 工具：\`parse_social_media\`
@@ -34,6 +36,7 @@ export const usage = `
 - 小红书：\`xiaohongshu.com\` / \`xhslink.com\`
 - 哔哩哔哩：\`bilibili.com\` / \`b23.tv\` / \`bili22.cn\` / \`bili23.cn\` / \`bili33.cn\` / \`bili2233.cn\`
 - Twitter/X：\`x.com\` / \`twitter.com\` / \`t.co\` / \`fxtwitter.com\` / \`vxtwitter.com\`
+- YouTube：\`youtube.com\` / \`youtu.be\` / \`m.youtube.com\` / \`music.youtube.com\`
 
 ### 自动解析与上下文注入
 
@@ -62,6 +65,20 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   ctx.inject(['chatluna'], (innerCtx) => {
     registerParseUrlTool(innerCtx as any, config)
+  })
+
+  ctx.inject(['console'], (innerCtx) => {
+    const packageBase = path.resolve(ctx.baseDir, 'node_modules/koishi-plugin-social-media-parser')
+    const entry = process.env.KOISHI_BASE
+      ? [`${process.env.KOISHI_BASE}/dist/index.js`]
+      : process.env.KOISHI_ENV === 'browser'
+        ? [path.resolve(__dirname, '../client/index.ts')]
+        : {
+            dev: path.resolve(packageBase, 'client/index.ts'),
+            prod: path.resolve(packageBase, 'dist'),
+          }
+
+    ;(innerCtx as any).console?.addEntry?.(entry as any)
   })
 
   logger.info('social-media-parser 插件已加载')

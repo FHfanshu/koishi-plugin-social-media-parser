@@ -1,14 +1,18 @@
 {
   "name": "koishi-plugin-social-media-parser",
-  "version": "0.1.4",
-  "description": "抖音、小红书和哔哩哔哩三合一解析插件，支持 ChatLuna 上下文注入",
+  "version": "0.1.6",
+  "description": "抖音、小红书、哔哩哔哩、Twitter(X)、YouTube 五合一解析插件，支持 ChatLuna 上下文注入",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
-    "lib"
+    "lib",
+    "client",
+    "dist"
   ],
   "scripts": {
-    "build": "rm -rf lib && tsc -p tsconfig.json",
+    "build": "rm -rf lib && tsc -p tsconfig.json && vite build",
+    "build:server": "rm -rf lib && tsc -p tsconfig.json",
+    "build:client": "vite build",
     "watch": "tsc -p tsconfig.json --watch"
   },
   "keywords": [
@@ -21,10 +25,14 @@
   ],
   "license": "MIT",
   "peerDependencies": {
+    "@koishijs/plugin-console": "^5.0.0",
     "koishi": "^4.18.4",
     "koishi-plugin-chatluna": "^1.0.0"
   },
   "peerDependenciesMeta": {
+    "@koishijs/plugin-console": {
+      "optional": true
+    },
     "koishi-plugin-chatluna": {
       "optional": true
     }
@@ -34,12 +42,15 @@
     "cheerio": "1.0.0-rc.12"
   },
   "devDependencies": {
+    "@koishijs/client": "^5.30.4",
     "@types/node": "^22.10.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vite": "^6.3.6",
+    "vue": "^3.5.13"
   },
   "koishi": {
     "description": {
-      "zh": "抖音+小红书+B站三合一解析插件，支持自动解析、手动命令和 ChatLuna 工具注入"
+      "zh": "抖音+小红书+B站+Twitter(X)+YouTube 五合一解析插件，支持自动解析、手动命令和 ChatLuna 工具注入"
     },
     "service": {
       "required": [

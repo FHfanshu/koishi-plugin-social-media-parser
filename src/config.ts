@@ -24,6 +24,10 @@ export interface DouyinConfig {
   enabled: boolean
   apiBaseUrl: string
   fallbackApiBaseUrls: string[]
+  rapidApiKey: string
+  rapidApiHost: string
+  rapidApiEndpointPath: string
+  rapidApiUrlParamKey: string
   maxImages: number
 }
 
@@ -45,6 +49,15 @@ export interface TwitterConfig {
   rapidApiKey: string
   rapidApiHost: string
   endpointPath: string
+  maxImages: number
+}
+
+export interface YouTubeConfig {
+  enabled: boolean
+  rapidApiKey: string
+  rapidApiHost: string
+  endpointPath: string
+  urlParamKey: string
   maxImages: number
 }
 
@@ -95,6 +108,7 @@ export interface Config {
   xiaohongshu: XiaohongshuConfig
   bilibili: BilibiliConfig
   twitter: TwitterConfig
+  youtube: YouTubeConfig
   forward: ForwardConfig
   autoParse: AutoParseConfig
   tool: ToolConfig
@@ -139,6 +153,10 @@ export const Config: Schema<Config> = Schema.intersect([
       enabled: Schema.boolean().default(true).description('启用抖音解析'),
       apiBaseUrl: Schema.string().default('https://api.douyin.wtf').description('Douyin_TikTok_Download_API 地址'),
       fallbackApiBaseUrls: Schema.array(String).role('table').default([]).description('抖音解析备用 API 地址列表（按顺序回退）'),
+      rapidApiKey: Schema.string().role('secret').default('').description('RapidAPI Key（X-RapidAPI-Key），配置后在常规 API 失败时作为备用解析链路'),
+      rapidApiHost: Schema.string().default('').description('RapidAPI Host（X-RapidAPI-Host），例如 xxx.p.rapidapi.com'),
+      rapidApiEndpointPath: Schema.string().default('/api/hybrid/video_data').description('RapidAPI 端点路径（例如 /api/hybrid/video_data 或 /download）'),
+      rapidApiUrlParamKey: Schema.string().default('url').description('RapidAPI 中链接参数名（默认 url）'),
       maxImages: Schema.number().default(9).min(1).max(20).description('图文最多保留图片数量'),
     }).description('抖音解析设置'),
     xiaohongshu: Schema.object({
@@ -159,6 +177,14 @@ export const Config: Schema<Config> = Schema.intersect([
       endpointPath: Schema.string().default('/download').description('RapidAPI 端点路径（如 /download）'),
       maxImages: Schema.number().default(9).min(1).max(20).description('图片推文最多保留图片数量'),
     }).description('Twitter/X 解析设置'),
+    youtube: Schema.object({
+      enabled: Schema.boolean().default(false).description('启用 YouTube 解析（Snap Video RapidAPI）'),
+      rapidApiKey: Schema.string().role('secret').default('').description('RapidAPI Key（X-RapidAPI-Key）'),
+      rapidApiHost: Schema.string().default('snap-video3.p.rapidapi.com').description('RapidAPI Host（X-RapidAPI-Host）'),
+      endpointPath: Schema.string().default('/download').description('RapidAPI 端点路径（默认 /download）'),
+      urlParamKey: Schema.string().default('url').description('请求参数名（默认 url）'),
+      maxImages: Schema.number().default(3).min(0).max(12).description('缩略图最多保留图片数量'),
+    }).description('YouTube 解析设置'),
     forward: Schema.object({
       enabled: Schema.boolean().default(true).description('图片内容优先使用合并转发（OneBot）'),
       nickname: Schema.string().default('内容解析').description('合并转发显示昵称'),
@@ -184,7 +210,7 @@ export const Config: Schema<Config> = Schema.intersect([
     tool: Schema.object({
       enabled: Schema.boolean().default(true).description('注册 ChatLuna 工具'),
       toolName: Schema.string().default('parse_social_media').description('工具名称'),
-      toolDescription: Schema.string().default('解析抖音、小红书或 Bilibili 链接并返回结构化内容摘要。').description('工具描述'),
+      toolDescription: Schema.string().default('解析抖音、小红书、Bilibili、Twitter(X) 或 YouTube 链接并返回结构化内容摘要。').description('工具描述'),
       contentLevel: Schema.union([
         Schema.const('summary').description('返回摘要（推荐）'),
         Schema.const('full').description('返回尽可能完整的正文与媒体列表')

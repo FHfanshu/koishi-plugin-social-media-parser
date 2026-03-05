@@ -21,6 +21,7 @@ interface DouyinImageMedia {
 type DouyinMedia = DouyinVideoMedia | DouyinImageMedia
 
 const IMAGE_SUFFIX_RE = /\.(?:png|jpe?g|webp|gif|bmp)(?:$|\?)/i
+const AUDIO_SUFFIX_RE = /\.(?:mp3|m4a|aac|wav|flac|ogg|opus)(?:$|\?)/i
 
 export async function parseDouyin(
   ctx: Context,
@@ -30,15 +31,65 @@ export async function parseDouyin(
 ): Promise<ParsedContent> {
   const apiBaseUrl = normalizeApiBaseUrl(config.douyin.apiBaseUrl || 'https://api.douyin.wtf')
   const timeoutMs = Math.max(30_000, config.timeoutMs)
-  const payload = await fetchHybridPayload(
-    ctx,
-    apiBaseUrl,
-    config.douyin.fallbackApiBaseUrls,
-    inputUrl,
-    timeoutMs,
-    logger,
-    config.debug
-  )
+  const payloadSources: Array<{ source: 'hybrid' | 'rapidapi'; payload: any }> = []
+  let lastError: Error | null = null
+
+  try {
+    const hybridPayload = await fetchHybridPayload(
+      ctx,
+      apiBaseUrl,
+      config.douyin.fallbackApiBaseUrls,
+      inputUrl,
+      timeoutMs,
+      logger,
+      config.debug
+    )
+    payloadSources.push({ source: 'hybrid', payload: hybridPayload })
+  } catch (error) {
+    lastError = error instanceof Error ? error : new Error(String(error))
+    if (config.debug) {
+      logger.info(`douyin hybrid chain failed: ${lastError.message}`)
+    }
+  }
+
+  try {
+    const rapidPayload = await fetchRapidApiPayload(
+      ctx,
+      config,
+      inputUrl,
+      timeoutMs,
+      logger,
+      config.debug
+    )
+    if (rapidPayload) {
+      payloadSources.push({ source: 'rapidapi', payload: rapidPayload })
+    }
+  } catch (error) {
+    lastError = error instanceof Error ? error : new Error(String(error))
+    if (config.debug) {
+      logger.info(`douyin rapidapi chain failed: ${lastError.message}`)
+    }
+  }
+
+  for (const item of payloadSources) {
+    try {
+      const parsed = parseDouyinPayload(item.payload, inputUrl, config, logger)
+      if (config.debug && item.source === 'rapidapi') {
+        logger.info('douyin parsed via rapidapi fallback')
+      }
+      return parsed
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      if (config.debug) {
+        logger.info(`douyin payload rejected from ${item.source}: ${lastError.message}`)
+      }
+    }
+  }
+
+  throw lastError || new Error('抖音解析失败：无可用数据源')
+}
+
+function parseDouyinPayload(payload: any, inputUrl: string, config: Config, logger: Logger): ParsedContent {
   const data = payload?.data ?? payload
   const code = toNumber(payload?.code)
 
@@ -148,6 +199,71 @@ async function fetchHybridPayload(
   }
 
   throw lastError || new Error('抖音解析请求失败')
+}
+
+async function fetchRapidApiPayload(
+  ctx: Context,
+  config: Config,
+  inputUrl: string,
+  timeoutMs: number,
+  logger: Logger,
+  debugEnabled: boolean
+): Promise<any | null> {
+  const key = (config.douyin.rapidApiKey || '').trim()
+  const host = (config.douyin.rapidApiHost || '').trim()
+  if (!key || !host) {
+    if (debugEnabled && (key || host)) {
+      logger.info('douyin rapidapi skipped: both rapidApiKey and rapidApiHost are required')
+    }
+    return null
+  }
+
+  const endpointPath = normalizeEndpointPath(config.douyin.rapidApiEndpointPath || '/api/hybrid/video_data')
+  const urlParamKey = normalizeQueryKey(config.douyin.rapidApiUrlParamKey || 'url')
+
+  const candidates = [inputUrl]
+  try {
+    const resolved = await resolveRedirect(ctx, inputUrl, Math.min(timeoutMs, 20_000), logger)
+    if (resolved && resolved !== inputUrl) {
+      candidates.push(resolved)
+    }
+  } catch {}
+
+  let lastError: Error | null = null
+  for (let index = 0; index < candidates.length; index += 1) {
+    const currentUrl = candidates[index]
+    const endpoint = `https://${host}${endpointPath}?${urlParamKey}=${encodeURIComponent(currentUrl)}`
+    try {
+      const text = await requestText(ctx, endpoint, timeoutMs, {
+        accept: 'application/json,text/plain,*/*',
+        'X-RapidAPI-Key': key,
+        'X-RapidAPI-Host': host,
+      })
+      if (!text || typeof text !== 'string') {
+        lastError = new Error('rapidapi empty response')
+        continue
+      }
+
+      const payload = JSON.parse(text)
+      if (toNumber(payload?.code) >= 400) {
+        lastError = new Error(extractRemoteError(payload) || `code=${payload?.code}`)
+        continue
+      }
+
+      return payload
+    } catch (error) {
+      const message = (error as Error)?.message || String(error)
+      lastError = error instanceof Error ? error : new Error(message)
+      if (debugEnabled) {
+        logger.info(`douyin rapidapi request failed: ${message}; endpoint=${endpoint}`)
+      }
+    }
+  }
+
+  if (lastError) {
+    throw lastError
+  }
+  return null
 }
 
 function pickMediaFromHybrid(root: any, inputUrl: string, config: Config, logger: Logger): DouyinMedia {
@@ -266,6 +382,10 @@ function extractVideoUrls(node: any): string[] {
       return
     }
 
+    if (!isLikelyVideoResourceUrl(normalized)) {
+      return
+    }
+
     urls.push(normalizePlayUrl(normalized))
   }
 
@@ -294,6 +414,10 @@ function extractVideoUrls(node: any): string[] {
   addUrl(node?.wm_video_url)
   addUrl(node?.play)
   addUrl(node?.play_url)
+  addUrl(node?.url)
+  addUrl(node?.download_url)
+  addUrl(node?.downloadUrl)
+  addUrl(node?.video)
 
   const bitRate = getPath(node, ['video', 'bit_rate'])
   if (Array.isArray(bitRate)) {
@@ -311,6 +435,10 @@ function extractVideoUrls(node: any): string[] {
     for (const nestedUrl of collectHttpUrls(videoNode, 64)) {
       addUrl(nestedUrl)
     }
+  }
+
+  for (const nestedUrl of collectHttpUrls(node, 128)) {
+    addUrl(nestedUrl)
   }
 
   return dedupe(urls)
@@ -503,6 +631,63 @@ function normalizeResourceUrl(value: unknown): string {
   }
 
   return text
+}
+
+function isLikelyVideoResourceUrl(url: string): boolean {
+  const lower = url.toLowerCase()
+
+  if (AUDIO_SUFFIX_RE.test(lower)) {
+    return false
+  }
+
+  if (lower.includes('/ies-music/')) {
+    return false
+  }
+
+  if (/(^|[?&])(?:mime_type|mimetype)=audio/i.test(lower)) {
+    return false
+  }
+
+  if (/(^|[?&])(?:mime_type|mimetype)=video/i.test(lower)) {
+    return true
+  }
+
+  if (/\.(?:mp4|webm|mov|m4v)(?:$|\?)/i.test(lower)) {
+    return true
+  }
+
+  if (lower.includes('douyinvod.com') || lower.includes('/video/tos/')) {
+    return true
+  }
+
+   if (
+    lower.includes('/aweme/v1/play')
+    || lower.includes('/aweme/v1/aweme/play')
+    || lower.includes('amemv.com')
+    || lower.includes('iesdouyin.com/aweme')
+    || lower.includes('bytecdn')
+    || lower.includes('ibytedtos')
+    || lower.includes('byteimg.com')
+    || lower.includes('video_id=')
+  ) {
+    return true
+  }
+
+  return false
+}
+
+function normalizeEndpointPath(input: string): string {
+  const trimmed = input.trim()
+  if (!trimmed) {
+    return '/api/hybrid/video_data'
+  }
+
+  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+}
+
+function normalizeQueryKey(input: string): string {
+  const trimmed = input.trim()
+  return trimmed || 'url'
 }
 
 function pickString(...values: unknown[]): string {

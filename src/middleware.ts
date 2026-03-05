@@ -4,7 +4,7 @@ import type { Config } from './config'
 import { injectParsedContext } from './context'
 import { parseSocialUrl } from './parse'
 import { sendParsedContent } from './utils/media'
-import { extractSocialUrlsFromSession, isBlocked } from './utils/url'
+import { detectPlatformByUrl, extractSocialUrlsFromSession, isBlocked } from './utils/url'
 
 const COOLDOWN_MIN_TTL_MS = 60_000
 const COOLDOWN_MAX_ENTRIES = 5_000
@@ -34,7 +34,7 @@ export function registerAutoParseMiddleware(
       if (config.debug) {
         const preview = typeof session.content === 'string' ? session.content.slice(0, 180) : ''
         const raw = typeof session.content === 'string' ? session.content : ''
-        if (/(douyin|iesdouyin|xiaohongshu|xhslink|bilibili|b23\.tv|twitter|x\.com|t\.co|fxtwitter|vxtwitter)/i.test(raw)) {
+        if (/(douyin|iesdouyin|xiaohongshu|xhslink|bilibili|b23\.tv|twitter|x\.com|t\.co|fxtwitter|vxtwitter|youtube|youtu\.be)/i.test(raw)) {
           logger.info(`auto parse skipped: no social url detected, channel=${session.channelId || 'unknown'}, preview=${preview}`)
         }
       }
@@ -52,11 +52,17 @@ export function registerAutoParseMiddleware(
 
     const limited = urls.slice(0, config.autoParse.maxUrlsPerMessage)
 
-    // Track resolved URLs to avoid sending duplicate content when the same
-    // note is referenced by multiple URL variants (e.g. short link + full URL).
     const resolvedSet = new Set<string>()
 
     for (const url of limited) {
+      const platform = detectPlatformByUrl(url)
+      if (platform && !isPlatformEnabled(config, platform)) {
+        if (config.debug) {
+          logger.info(`auto parse skipped: ${platform} disabled, url=${url}`)
+        }
+        continue
+      }
+
       const cooldownKey = `${session.channelId || session.guildId || session.userId}:${url}`
       const lastTime = cooldownMap.get(cooldownKey) ?? 0
       if (Date.now() - lastTime < config.cooldownMs) {
@@ -74,8 +80,6 @@ export function registerAutoParseMiddleware(
       try {
         const parsed = await parseSocialUrl(ctx, url, config, logger)
 
-        // Deduplicate by resolved URL — different input URLs can resolve to
-        // the same canonical page (short link, app card, text link, etc.).
         const resolvedKey = parsed.resolvedUrl || parsed.originalUrl
         if (resolvedSet.has(resolvedKey)) {
           if (config.debug) {
@@ -105,6 +109,14 @@ export function registerAutoParseMiddleware(
         }
       } catch (error) {
         const message = (error as Error)?.message || String(error)
+
+        if (isDisabledParseError(message)) {
+          if (config.debug) {
+            logger.info(`auto parse skipped: ${message}, url=${url}`)
+          }
+          continue
+        }
+
         logger.warn(`auto parse failed: ${message}`)
         if (config.debug) {
           try {
@@ -141,4 +153,24 @@ function cleanupCooldownMap(cooldownMap: Map<string, number>, now: number, coold
   for (let i = 0; i < overflow; i += 1) {
     cooldownMap.delete(ordered[i][0])
   }
+}
+
+function isPlatformEnabled(config: Config, platform: 'douyin' | 'xiaohongshu' | 'bilibili' | 'twitter' | 'youtube'): boolean {
+  if (platform === 'douyin') {
+    return config.douyin.enabled
+  }
+  if (platform === 'xiaohongshu') {
+    return config.xiaohongshu.enabled
+  }
+  if (platform === 'bilibili') {
+    return config.bilibili.enabled
+  }
+  if (platform === 'twitter') {
+    return config.twitter.enabled
+  }
+  return config.youtube.enabled
+}
+
+function isDisabledParseError(message: string): boolean {
+  return message.endsWith('解析已禁用。') || message.endsWith('解析已禁用')
 }

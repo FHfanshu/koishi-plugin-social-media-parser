@@ -12,6 +12,7 @@ export interface InjectContextOptions {
   contextMaxChars: number
   injectMedia: boolean
   mediaInject: MediaInjectConfig
+  conversationId?: string
   maxVideoDurationSec?: number
   maxVideoDownloadBytes?: number
 }
@@ -30,11 +31,7 @@ export async function injectParsedContext(
     return
   }
 
-  const conversationId = typeof session.guildId === 'string' && session.guildId
-    ? session.guildId
-    : typeof session.channelId === 'string' && session.channelId
-      ? session.channelId
-      : ''
+  const conversationId = resolveConversationId(session, options.conversationId)
 
   if (!conversationId) {
     return
@@ -72,6 +69,26 @@ export async function injectParsedContext(
     once: true,
     stage: 'after_scratchpad',
   })
+}
+
+function resolveConversationId(session: Session, explicitConversationId?: string): string {
+  if (typeof explicitConversationId === 'string' && explicitConversationId) {
+    return explicitConversationId
+  }
+
+  if (typeof (session as any)?.conversationId === 'string' && (session as any).conversationId) {
+    return (session as any).conversationId
+  }
+
+  if (typeof session.guildId === 'string' && session.guildId) {
+    return session.guildId
+  }
+
+  if (typeof session.channelId === 'string' && session.channelId) {
+    return session.channelId
+  }
+
+  return ''
 }
 
 async function buildMediaInjectionMessage(
@@ -142,6 +159,8 @@ async function buildMediaInjectionMessage(
         ? Number(parsed.videoDurationSec)
         : null
 
+      const allowUnknownDuration = parsed.platform === 'bilibili' || parsed.platform === 'douyin'
+
       // Duration guard: skip video injection if over the global limit
       if (maxVideoDurationSec && maxVideoDurationSec > 0) {
         const durationSec = knownDurationSec && knownDurationSec > 0
@@ -149,7 +168,7 @@ async function buildMediaInjectionMessage(
           : await probeVideoDuration(downloaded.buffer, downloaded.mimeType, mediaConfig.ffmpegTimeoutMs)
 
         if (durationSec == null) {
-          if (parsed.platform === 'bilibili') {
+          if (allowUnknownDuration) {
             logger.warn(`context video duration probe failed, continue with unknown duration: source=${videoUrl}`)
           } else {
             shouldProcessVideo = false
@@ -225,7 +244,7 @@ async function buildMediaInjectionMessage(
             }
           }
         } else {
-          if (parsed.platform === 'bilibili' && isSafePublicHttpUrl(videoUrl)) {
+          if ((parsed.platform === 'bilibili' || parsed.platform === 'douyin') && isSafePublicHttpUrl(videoUrl)) {
             injectedVideo = true
             parts.push({
               type: 'video_url',
@@ -243,8 +262,20 @@ async function buildMediaInjectionMessage(
       }
     } catch (error) {
       logger.debug(`inject video failed: ${String((error as Error)?.message || error)}`)
-      skipReasons.push('video download/process failed')
-      videoSkipReason = `video download/process failed: ${String((error as Error)?.message || error)}`
+      if ((parsed.platform === 'bilibili' || parsed.platform === 'douyin') && isSafePublicHttpUrl(videoUrl)) {
+        injectedVideo = true
+        parts.push({
+          type: 'video_url',
+          video_url: {
+            url: videoUrl,
+            mimeType: 'video/mp4',
+          },
+        })
+        logger.warn(`context video download/process failed, fallback to raw video url: source=${videoUrl}`)
+      } else {
+        skipReasons.push('video download/process failed')
+        videoSkipReason = `video download/process failed: ${String((error as Error)?.message || error)}`
+      }
     }
   } else if (mediaConfig.videoEnabled) {
     skipReasons.push('no direct video url available')

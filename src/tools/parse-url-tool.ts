@@ -34,7 +34,7 @@ export function registerParseUrlTool(ctx: Ctx, config: Config): void {
   const safeToolName = sanitizeToolName(toolName, 'parse_social_media')
   const safeToolDescription = sanitizeToolDescription(
     config.tool.toolDescription,
-    '解析抖音、小红书、Bilibili 或 Twitter(X) 链接，返回标题、正文、图片和视频信息。'
+    '解析抖音、小红书、Bilibili、Twitter(X) 或 YouTube 链接，返回标题、正文、图片和视频信息。'
   )
 
   ctx.effect(() => {
@@ -57,6 +57,13 @@ export function registerParseUrlTool(ctx: Ctx, config: Config): void {
   })
 }
 
+interface ToolRuntimeConfig {
+  configurable?: {
+    session?: any
+    conversationId?: string
+  }
+}
+
 class ParseUrlTool extends Tool {
   name: string
   description: string
@@ -71,7 +78,7 @@ class ParseUrlTool extends Tool {
     this.name = sanitizeToolName(toolName, 'parse_social_media')
     this.description = sanitizeToolDescription(
       toolDescription,
-      '解析抖音、小红书、Bilibili 或 Twitter(X) 链接，返回标题、正文、图片和视频信息。'
+      '解析抖音、小红书、Bilibili、Twitter(X) 或 YouTube 链接，返回标题、正文、图片和视频信息。'
     )
   }
 
@@ -83,12 +90,13 @@ class ParseUrlTool extends Tool {
     const logger = this.ctx.logger('social-media-parser')
     const url = normalizeInputUrl(input)
     if (!url) {
-      return '输入中未找到有效的抖音、小红书、Bilibili 或 Twitter(X) 链接。'
+      return '输入中未找到有效的抖音、小红书、Bilibili、Twitter(X) 或 YouTube 链接。'
     }
 
     try {
       const parsed = await parseSocialUrl(this.ctx, url, this.config, logger)
-      const session = (parentConfig as any)?.configurable?.session
+      const configurable = (parentConfig as ToolRuntimeConfig | undefined)?.configurable
+      const session = configurable?.session
 
       if (this.config.tool.injectContext && session) {
         await injectParsedContext(
@@ -99,6 +107,7 @@ class ParseUrlTool extends Tool {
             contextMaxChars: 1500,
             injectMedia: this.config.tool.injectMedia,
             mediaInject: this.config.tool.mediaInject,
+            conversationId: configurable?.conversationId,
             maxVideoDurationSec: this.config.maxVideoDurationSec,
             maxVideoDownloadBytes: this.config.maxVideoDownloadBytes,
           },
