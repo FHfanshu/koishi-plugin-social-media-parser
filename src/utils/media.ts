@@ -84,7 +84,7 @@ export async function sendParsedContent(
           )
         }
 
-        const forwarded = await sendForwardNodes(session, nodes, config, logger)
+        const forwarded = await sendForwardNodes(ctx, session, nodes, config, logger)
         if (!forwarded) {
           await sendVideoPlainFallback(ctx, session, intro, videoElement, parsed, config, logger)
         }
@@ -123,7 +123,7 @@ export async function sendParsedContent(
         )
       }
 
-      const forwarded = await sendForwardNodes(session, nodes, config, logger)
+      const forwarded = await sendForwardNodes(ctx, session, nodes, config, logger)
       if (forwarded) {
         return
       }
@@ -141,7 +141,7 @@ export async function sendParsedContent(
 
   if (shouldForwardTextOnly) {
     const nodes = createForwardTextNodes(intro, session, config)
-    const forwarded = await sendForwardNodes(session, nodes, config, logger)
+    const forwarded = await sendForwardNodes(ctx, session, nodes, config, logger)
     if (forwarded) {
       return
     }
@@ -409,6 +409,7 @@ async function buildImageSegments(
 }
 
 async function sendForwardNodes(
+  ctx: Context,
   session: Session,
   nodes: any[],
   config: Config,
@@ -420,13 +421,104 @@ async function sendForwardNodes(
 
   const safeNodes = nodes.slice(0, config.forward.maxForwardNodes)
 
+  if (await trySendForward(session, safeNodes, logger, 'primary')) {
+    return true
+  }
+
+  await sleep(600)
+  const retryNodes = await rewriteForwardNodesForRetry(ctx, safeNodes, config, logger)
+  return trySendForward(session, retryNodes, logger, 'retry')
+}
+
+async function trySendForward(
+  session: Session,
+  nodes: any[],
+  logger: Logger,
+  label: string
+): Promise<boolean> {
   try {
-    await session.send(h('message', { forward: true }, safeNodes))
+    await session.send(h('message', { forward: true }, nodes))
     return true
   } catch (error) {
-    logger.debug(`forward send failed: ${String((error as Error)?.message || error)}`)
+    logger.debug(`forward send failed (${label}): ${String((error as Error)?.message || error)}`)
     return false
   }
+}
+
+async function rewriteForwardNodesForRetry(
+  ctx: Context,
+  nodes: any[],
+  config: Config,
+  logger: Logger
+): Promise<any[]> {
+  return Promise.all(nodes.map((node) => rewriteForwardNodeElement(ctx, node, config, logger)))
+}
+
+async function rewriteForwardNodeElement(
+  ctx: Context,
+  element: any,
+  config: Config,
+  logger: Logger
+): Promise<any> {
+  if (!element || typeof element !== 'object') {
+    return element
+  }
+
+  const attrs = element.attrs && typeof element.attrs === 'object'
+    ? { ...element.attrs }
+    : element.attrs
+
+  if (
+    attrs &&
+    (element.type === 'img' || element.type === 'image') &&
+    typeof attrs.src === 'string' &&
+    attrs.src.startsWith('http')
+  ) {
+    const inlined = await inlineForwardImage(ctx, attrs.src, config, logger)
+    if (inlined) {
+      attrs.src = inlined
+    }
+  }
+
+  const children = Array.isArray(element.children)
+    ? await Promise.all(element.children.map((child: any) => rewriteForwardNodeElement(ctx, child, config, logger)))
+    : element.children
+
+  return {
+    ...element,
+    attrs,
+    children,
+  }
+}
+
+async function inlineForwardImage(
+  ctx: Context,
+  url: string,
+  config: Config,
+  logger: Logger
+): Promise<string | null> {
+  const referer = inferMediaReferer(url)
+  try {
+    const downloaded = await downloadBuffer(ctx, url, config.timeoutMs, {
+      headers: referer
+        ? {
+            referer,
+            accept: '*/*',
+          }
+        : {
+            accept: '*/*',
+          },
+      maxBytes: config.maxMediaBytes,
+    })
+    return `data:${downloaded.mimeType || 'image/jpeg'};base64,${downloaded.buffer.toString('base64')}`
+  } catch (error) {
+    logger.debug(`forward image inline retry skipped: ${String((error as Error)?.message || error)}`)
+    return null
+  }
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 async function sendVideoPlainFallback(
