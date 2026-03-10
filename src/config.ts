@@ -78,9 +78,6 @@ export interface AutoParseConfig {
   blockedUsers: string[]
   maxUrlsPerMessage: number
   injectContext: boolean
-  injectMedia: boolean
-  contextMaxChars: number
-  mediaInject: MediaInjectConfig
 }
 
 export interface ToolConfig {
@@ -88,9 +85,6 @@ export interface ToolConfig {
   toolName: string
   toolDescription: string
   contentLevel: ToolContentLevel
-  injectContext: boolean
-  injectMedia: boolean
-  mediaInject: MediaInjectConfig
 }
 
 export interface Config {
@@ -131,6 +125,21 @@ const MediaInjectSchema: Schema<MediaInjectConfig> = Schema.object({
   maxTotalBytes: Schema.number().default(10 * 1024 * 1024).description('单次注入媒体总大小上限（bytes）'),
   ffmpegTimeoutMs: Schema.number().default(30_000).min(3_000).max(180_000).description('ffmpeg 处理超时（毫秒）'),
 })
+
+export const DEFAULT_MEDIA_INJECT_CONFIG: MediaInjectConfig = {
+  enabled: true,
+  maxImages: 3,
+  imageMaxEdgePx: 800,
+  imageQuality: 75,
+  videoEnabled: true,
+  videoResolution: 480,
+  videoMaxDurationSec: 60,
+  longVideoFrameIntervalSec: 5,
+  longVideoMaxFrames: 12,
+  keepAudio: true,
+  maxTotalBytes: 10 * 1024 * 1024,
+  ffmpegTimeoutMs: 30_000,
+}
 
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
@@ -202,22 +211,16 @@ export const Config: Schema<Config> = Schema.intersect([
       blockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（支持 platform:guildId）'),
       blockedUsers: Schema.array(String).role('table').default([]).description('自动解析 user 黑名单（支持 platform:userId）'),
       maxUrlsPerMessage: Schema.number().default(3).min(1).max(10).description('单条消息最多解析链接数量'),
-      injectContext: Schema.boolean().default(true).description('自动解析后静默注入 ChatLuna 上下文'),
-      injectMedia: Schema.boolean().default(true).description('自动解析时注入压缩媒体（图片/视频）'),
-      contextMaxChars: Schema.number().default(500).min(100).max(4_000).description('注入摘要正文最大字符数'),
-      mediaInject: MediaInjectSchema,
+      injectContext: Schema.boolean().default(false).description('自动解析后静默注入 ChatLuna 上下文（默认关闭）'),
     }).description('自动解析与上下文注入'),
     tool: Schema.object({
-      enabled: Schema.boolean().default(true).description('注册 ChatLuna 工具'),
+      enabled: Schema.boolean().default(false).description('注册 ChatLuna 工具（默认关闭）'),
       toolName: Schema.string().default('parse_social_media').description('工具名称'),
       toolDescription: Schema.string().default('解析抖音、小红书、Bilibili、Twitter(X) 或 YouTube 链接并返回结构化内容摘要。').description('工具描述'),
       contentLevel: Schema.union([
         Schema.const('summary').description('返回摘要（推荐）'),
         Schema.const('full').description('返回尽可能完整的正文与媒体列表')
       ]).default('summary').description('工具返回内容级别'),
-      injectContext: Schema.boolean().default(true).description('工具调用后注入上下文（仅同会话）'),
-      injectMedia: Schema.boolean().default(true).description('工具调用时注入压缩媒体（图片/视频）'),
-      mediaInject: MediaInjectSchema,
     }).description('ChatLuna 工具设置'),
   }).description('自动解析与工具设置'),
 ])

@@ -58,6 +58,7 @@ export async function parseBilibili(
   return {
     platform: 'bilibili',
     title: detail.title,
+    author: detail.owner || undefined,
     content: buildContent(detail, config.bilibili.maxDescLength),
     images: detail.cover ? [detail.cover] : [],
     videos: videoUrl ? [videoUrl] : [],
@@ -383,7 +384,6 @@ async function requestJson(
 
 function buildContent(detail: BilibiliVideoDetail, maxDescLength: number): string {
   const lines = [
-    `UP主: ${detail.owner || '未知'}`,
     `播放: ${formatCount(detail.stats.view)} | 点赞: ${formatCount(detail.stats.like)} | 投币: ${formatCount(detail.stats.coin)}`,
     `收藏: ${formatCount(detail.stats.favorite)} | 转发: ${formatCount(detail.stats.share)} | 弹幕: ${formatCount(detail.stats.danmaku)}`,
   ]

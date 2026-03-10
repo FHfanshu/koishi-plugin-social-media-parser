@@ -189,6 +189,8 @@ function normalizeSingleUrl(raw: string): string | null {
     return null
   }
 
+  normalizeKnownSharePath(parsed)
+
   if (!detectPlatformByUrl(parsed.toString())) {
     return null
   }
@@ -397,6 +399,34 @@ function compactLooseUrl(value: string): string {
   return value
     .replace(/[\u200b-\u200f\ufeff]/g, '')
     .replace(/\s+/g, '')
+}
+
+function normalizeKnownSharePath(parsed: URL): void {
+  const hostname = parsed.hostname.toLowerCase()
+  const isKnownShortHost = hostname === 'b23.tv'
+    || hostname.endsWith('.b23.tv')
+    || hostname === 'xhslink.com'
+    || hostname.endsWith('.xhslink.com')
+    || hostname === 'v.douyin.com'
+
+  if (!isKnownShortHost) {
+    return
+  }
+
+  parsed.search = ''
+
+  const token = parsed.pathname.split('/').filter(Boolean)[0]
+  if (!token) {
+    return
+  }
+
+  const cleanedToken = token.replace(/(?:%22|%27|%2C|%7B|%7D|["',{}]).*$/i, '')
+  if (!cleanedToken || cleanedToken === token) {
+    return
+  }
+
+  parsed.pathname = `/${cleanedToken}`
+  parsed.search = ''
 }
 
 function isPrivateIpv6(hostname: string): boolean {

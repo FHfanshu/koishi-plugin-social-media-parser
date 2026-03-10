@@ -2,6 +2,7 @@ import { h, segment } from 'koishi'
 import type { Context, Logger, Session } from 'koishi'
 
 import type { Config } from '../config'
+import { DEFAULT_MEDIA_INJECT_CONFIG } from '../config'
 import type { ParsedContent } from '../types'
 import { processVideoForContext, probeVideoDuration } from './compress'
 import { downloadBuffer } from './http'
@@ -304,7 +305,7 @@ async function isDurationAllowed(
     : await probeVideoDuration(
       downloaded.buffer,
       downloaded.mimeType || 'video/mp4',
-      config.autoParse?.mediaInject?.ffmpegTimeoutMs ?? 30_000
+      DEFAULT_MEDIA_INJECT_CONFIG.ffmpegTimeoutMs
     )
 
   if (durationSec == null) {
@@ -333,7 +334,7 @@ async function optimizeVideoBeforeSend(
   config: Config,
   logger: Logger
 ): Promise<{ buffer: Buffer; mimeType: string } | null> {
-  const mediaConfig = config.autoParse?.mediaInject
+  const mediaConfig = DEFAULT_MEDIA_INJECT_CONFIG
   if (!mediaConfig?.enabled || !mediaConfig.videoEnabled) {
     return null
   }

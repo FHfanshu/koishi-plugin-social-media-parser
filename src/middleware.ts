@@ -1,6 +1,7 @@
 import type { Context } from 'koishi'
 
 import type { Config } from './config'
+import { DEFAULT_MEDIA_INJECT_CONFIG } from './config'
 import { injectParsedContext } from './context'
 import { parseSocialUrl } from './parse'
 import { sendParsedContent } from './utils/media'
@@ -97,9 +98,9 @@ export function registerAutoParseMiddleware(
             session,
             parsed,
             {
-              contextMaxChars: config.autoParse.contextMaxChars,
-              injectMedia: config.autoParse.injectMedia,
-              mediaInject: config.autoParse.mediaInject,
+              contextMaxChars: 500,
+              injectMedia: false,
+              mediaInject: DEFAULT_MEDIA_INJECT_CONFIG,
               maxVideoDurationSec: config.maxVideoDurationSec,
               maxVideoDownloadBytes: config.maxVideoDownloadBytes,
             },

@@ -12,6 +12,11 @@
 - 长文本/多图自动合并转发，减少刷屏
 - 抖音解析使用 Douyin_TikTok_Download_API（`/api/hybrid/video_data`）
 
+默认行为：
+
+- `autoParse.injectContext=false`（默认不注入 ChatLuna 上下文）
+- `tool.enabled=false`（默认不注册 `parse_social_media` 工具）
+
 ## 配置要点
 
 - `douyin.apiBaseUrl`: Douyin_TikTok_Download_API 地址（默认 `https://api.douyin.wtf`）
@@ -28,7 +33,7 @@
 - `autoParse.blockedGuilds`: 自动解析群黑名单
 - `autoParse.blockedUsers`: 自动解析用户黑名单
 - `autoParse.injectContext`: 自动解析后注入上下文
-- `autoParse.mediaInject.*`: 媒体注入参数（分辨率、时长、抽帧等）
+- `autoParse.injectContext`: 自动解析后注入上下文（默认关闭）
 - `forward.autoMergeForward`: 长文本/多图自动合并转发
 
 ## 开发

@@ -7,6 +7,7 @@ export type ToolContentLevel = 'summary' | 'full'
 export interface ParsedContent {
   platform: SocialPlatform
   title: string
+  author?: string
   content: string
   images: string[]
   videos: string[]

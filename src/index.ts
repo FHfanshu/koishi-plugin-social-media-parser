@@ -12,7 +12,7 @@ export const name = 'social-media-parser'
 
 export const inject = {
   required: ['http'],
-  optional: ['chatluna', 'chatluna_character', 'chatluna_storage', 'console'],
+  optional: ['chatluna', 'chatluna_storage', 'ffmpeg', 'console'],
 } as const
 
 export const usage = `
@@ -21,14 +21,14 @@ export const usage = `
 抖音 + 小红书 + 哔哩哔哩 + Twitter(X) + YouTube 五合一解析插件，支持：
 - 自动解析（guild 黑名单）
 - 手动命令：\`parse <url>\`
-- ChatLuna 工具：\`parse_social_media\`
+- ChatLuna 工具：\`parse_social_media\`（默认关闭）
 
 ### 依赖项
 
 - 必需：\`http\`（用于 API 请求与媒体下载）
 - 可选：\`chatluna\`（注册 \`parse_social_media\` 工具）
-- 可选：\`chatluna_character\`（角色相关广播能力，可选）
 - 可选：\`chatluna_storage\`（媒体持久化存储，避免 base64 data URI）
+- 可选：\`ffmpeg\`（优先使用 Koishi 提供的 ffmpeg/ffprobe 路径）
 
 ### 支持平台
 
@@ -41,7 +41,7 @@ export const usage = `
 ### 自动解析与上下文注入
 
 - 自动解析受 \`autoParse.blockedGuilds\` / \`autoParse.blockedUsers\` 黑名单限制。
-- 自动解析命中后会发送媒体到群聊，并可静默注入 ChatLuna 上下文。
+- 自动解析命中后会发送媒体到群聊；默认不做 ChatLuna 上下文注入。
 - 默认不主动触发角色回复（仅作为后续对话上下文）。
 
 ### 视频处理策略
@@ -59,6 +59,16 @@ export function apply(ctx: Context, config: PluginConfig): void {
   }
 
   const cooldownMap = new Map<string, number>()
+
+  const ffmpegService = (ctx as any).ffmpeg
+  const ffmpegPath = ffmpegService?.executable || ffmpegService?.path || ffmpegService?.ffmpegPath
+  const ffprobePath = ffmpegService?.ffprobePath || ffmpegService?.ffprobe
+  if (!process.env.FFMPEG_PATH && typeof ffmpegPath === 'string' && ffmpegPath) {
+    process.env.FFMPEG_PATH = ffmpegPath
+  }
+  if (!process.env.FFPROBE_PATH && typeof ffprobePath === 'string' && ffprobePath) {
+    process.env.FFPROBE_PATH = ffprobePath
+  }
 
   registerParseCommand(ctx, config)
   registerAutoParseMiddleware(ctx, config, cooldownMap)

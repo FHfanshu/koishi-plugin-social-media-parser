@@ -1,10 +1,8 @@
 import type { CallbackManagerForToolRun } from '@langchain/core/callbacks/manager'
-import type { RunnableConfig } from '@langchain/core/runnables'
 import { Tool } from '@langchain/core/tools'
 import type { Context } from 'koishi'
 
 import type { Config } from '../config'
-import { injectParsedContext } from '../context'
 import { parseSocialUrl } from '../parse'
 import type { ParsedContent } from '../types'
 import { normalizeInputUrl } from '../utils/url'
@@ -57,13 +55,6 @@ export function registerParseUrlTool(ctx: Ctx, config: Config): void {
   })
 }
 
-interface ToolRuntimeConfig {
-  configurable?: {
-    session?: any
-    conversationId?: string
-  }
-}
-
 class ParseUrlTool extends Tool {
   name: string
   description: string
@@ -84,8 +75,7 @@ class ParseUrlTool extends Tool {
 
   async _call(
     input: string,
-    _runManager?: CallbackManagerForToolRun,
-    parentConfig?: RunnableConfig
+    _runManager?: CallbackManagerForToolRun
   ): Promise<string> {
     const logger = this.ctx.logger('social-media-parser')
     const url = normalizeInputUrl(input)
@@ -95,27 +85,6 @@ class ParseUrlTool extends Tool {
 
     try {
       const parsed = await parseSocialUrl(this.ctx, url, this.config, logger)
-      const configurable = (parentConfig as ToolRuntimeConfig | undefined)?.configurable
-      const session = configurable?.session
-
-      if (this.config.tool.injectContext && session) {
-        await injectParsedContext(
-          this.ctx,
-          session,
-          parsed,
-          {
-            contextMaxChars: 1500,
-            injectMedia: this.config.tool.injectMedia,
-            mediaInject: this.config.tool.mediaInject,
-            conversationId: configurable?.conversationId,
-            maxVideoDurationSec: this.config.maxVideoDurationSec,
-            maxVideoDownloadBytes: this.config.maxVideoDownloadBytes,
-          },
-          logger,
-          'tool'
-        )
-      }
-
       return formatToolOutput(parsed, this.config.tool.contentLevel)
     } catch (error) {
       const message = (error as Error)?.message || String(error)
@@ -125,29 +94,48 @@ class ParseUrlTool extends Tool {
 }
 
 function formatToolOutput(parsed: ParsedContent, contentLevel: 'summary' | 'full'): string {
-  if (contentLevel === 'full') {
-    return [
-      '[SocialMediaContent]',
-      `平台: ${parsed.platform}`,
-      `标题: ${parsed.title || '无标题'}`,
-      `正文: ${parsed.content || '(无)'}`,
-      `图片数量: ${parsed.images.length}`,
-      ...parsed.images.map((url, index) => `图片${index + 1}: ${url}`),
-      `视频数量: ${parsed.videos.length}`,
-      ...parsed.videos.map((url, index) => `视频${index + 1}: ${url}`),
-      `来源链接: ${parsed.resolvedUrl || parsed.originalUrl}`,
-    ].join('\n')
+  const safeCover = normalizeHttpUrls(parsed.images)
+  const safeVideo = normalizeHttpUrls(parsed.videos)
+  const safeAudio = parsed.musicUrl ? normalizeHttpUrls([parsed.musicUrl]) : []
+
+  const output = {
+    platform: parsed.platform,
+    title: parsed.title || '无标题',
+    author: parsed.author || '',
+    content: contentLevel === 'full'
+      ? (parsed.content || '(无)')
+      : truncate(parsed.content || '(无)', 500),
+    url: parsed.resolvedUrl || parsed.originalUrl,
+    resources: {
+      cover: safeCover,
+      video: safeVideo,
+      audio: safeAudio,
+      mergedVideo: safeVideo[0] || '',
+    },
   }
 
-  return [
-    '[SocialMediaContent]',
-    `平台: ${parsed.platform}`,
-    `标题: ${parsed.title || '无标题'}`,
-    `正文摘要: ${truncate(parsed.content || '(无)', 500)}`,
-    `图片数量: ${parsed.images.length}`,
-    `视频数量: ${parsed.videos.length}`,
-    `来源链接: ${parsed.resolvedUrl || parsed.originalUrl}`,
-  ].join('\n')
+  return ['[SocialMediaContent]', JSON.stringify(output, null, 2)].join('\n')
+}
+
+function normalizeHttpUrls(urls: string[]): string[] {
+  const normalized: string[] = []
+  for (const item of urls) {
+    const value = item.trim()
+    if (!value) {
+      continue
+    }
+
+    if (/^https?:\/\//i.test(value)) {
+      normalized.push(value)
+      continue
+    }
+
+    if (value.startsWith('//')) {
+      normalized.push(`https:${value}`)
+    }
+  }
+
+  return Array.from(new Set(normalized))
 }
 
 function truncate(text: string, maxLength: number): string {
