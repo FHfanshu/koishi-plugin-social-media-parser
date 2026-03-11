@@ -18,6 +18,7 @@ export async function sendParsedContent(
   logger: Logger
 ): Promise<void> {
   const isOneBot = session.platform === 'onebot'
+  const isTwitter = parsed.platform === 'twitter'
   const sourceUrl = simplifyDisplayUrl(parsed.resolvedUrl || parsed.originalUrl)
   const platformName = parsed.platform === 'douyin'
     ? '抖音'
@@ -28,13 +29,7 @@ export async function sendParsedContent(
       : parsed.platform === 'youtube'
         ? 'YouTube'
         : '小红书'
-  const textBody = parsed.content?.trim() ? truncateText(parsed.content.trim(), 350) : ''
-
-  const intro = [
-    `【${platformName}解析】${parsed.title || '无标题'}`,
-    textBody,
-    sourceUrl,
-  ].filter(Boolean).join('\n\n')
+  const intro = buildIntroText(platformName, parsed, sourceUrl, config)
 
   const shouldAutoForward =
     isOneBot
@@ -59,10 +54,14 @@ export async function sendParsedContent(
     if (!videoElement) {
       logger.info(`video unavailable or skipped, fallback to image/text: ${primaryVideo}`)
     } else {
-      const shouldForwardVideo = shouldAutoForward || shouldForwardByMediaCount
+      const shouldForwardVideo = isTwitter
+        ? Boolean(config.twitterSendPolicy.forwardTextAndImages)
+        : (shouldAutoForward || shouldForwardByMediaCount)
       if (shouldForwardVideo) {
         const nodes = createForwardTextNodes(intro, session, config)
-        const includeVideoInForward = config.forward.experimentalForwardVideo
+        const includeVideoInForward = isTwitter
+          ? !config.twitterSendPolicy.videoAsPlainMessage
+          : config.forward.experimentalForwardVideo
         let imageSegments: any[] = []
         if (includeVideoInForward && nodes.length < config.forward.maxForwardNodes) {
           nodes.push(h('message', { nickname: config.forward.nickname, userId: session.selfId }, videoElement))
@@ -91,7 +90,7 @@ export async function sendParsedContent(
         if (!forwarded) {
           await sendImagesPlain(session, intro, imageSegments, parsed.musicUrl, config)
         }
-        if (!includeVideoInForward || !forwarded) {
+        if (config.twitterSendPolicy.videoAsPlainMessage || !includeVideoInForward || !forwarded) {
           await session.send(videoElement)
         }
       } else {
@@ -105,10 +104,13 @@ export async function sendParsedContent(
 
   if (parsed.images.length > 0) {
     const imageSegments = await buildImageSegments(ctx, parsed.images, config, logger)
-    const shouldForwardImages =
-      isOneBot
-      && config.forward.enabled
-      && (shouldAutoForward || shouldForwardByMediaCount || parsed.images.length >= config.forward.imageMergeThreshold)
+    const shouldForwardImages = isTwitter
+      ? isOneBot && config.forward.enabled && config.twitterSendPolicy.forwardTextAndImages
+      : (
+        isOneBot
+        && config.forward.enabled
+        && (shouldAutoForward || shouldForwardByMediaCount || parsed.images.length >= config.forward.imageMergeThreshold)
+      )
 
     if (shouldForwardImages) {
       const nodes = createForwardTextNodes(intro, session, config)
@@ -140,10 +142,14 @@ export async function sendParsedContent(
   }
 
   const shouldForwardTextOnly =
-    isOneBot
-    && config.forward.enabled
-    && config.forward.autoMergeForward
-    && (intro.length >= config.forward.longTextThreshold || shouldForwardByMediaCount)
+    isTwitter
+      ? isOneBot && config.forward.enabled && config.twitterSendPolicy.forwardTextAndImages
+      : (
+        isOneBot
+        && config.forward.enabled
+        && config.forward.autoMergeForward
+        && (intro.length >= config.forward.longTextThreshold || shouldForwardByMediaCount)
+      )
 
   if (shouldForwardTextOnly) {
     const nodes = createForwardTextNodes(intro, session, config)
@@ -542,6 +548,32 @@ async function sendImagesPlain(
   if (config.forward.includeMusic && musicUrl) {
     await session.send(h('audio', { src: musicUrl }))
   }
+}
+
+function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: string, config: Config): string {
+  const originalText = parsed.content?.trim() ? truncateText(parsed.content.trim(), 350) : ''
+  const translatedText = parsed.translatedContent?.trim() ? truncateText(parsed.translatedContent.trim(), 350) : ''
+
+  if (parsed.platform === 'twitter' && translatedText) {
+    const textPart = config.twitterTranslation.showOriginal
+      ? [
+          originalText ? `原文：\n${originalText}` : '',
+          `翻译：\n${translatedText}`,
+        ].filter(Boolean).join('\n\n')
+      : `翻译：\n${translatedText}`
+
+    return [
+      `【${platformName}解析】${parsed.title || '无标题'}`,
+      textPart,
+      sourceUrl,
+    ].filter(Boolean).join('\n\n')
+  }
+
+  return [
+    `【${platformName}解析】${parsed.title || '无标题'}`,
+    originalText,
+    sourceUrl,
+  ].filter(Boolean).join('\n\n')
 }
 
 function truncateText(text: string, maxLength: number): string {

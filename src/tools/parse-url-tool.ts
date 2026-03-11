@@ -105,6 +105,9 @@ function formatToolOutput(parsed: ParsedContent, contentLevel: 'summary' | 'full
     content: contentLevel === 'full'
       ? (parsed.content || '(无)')
       : truncate(parsed.content || '(无)', 500),
+    translatedContent: contentLevel === 'full'
+      ? (parsed.translatedContent || '')
+      : truncate(parsed.translatedContent || '', 500),
     url: parsed.resolvedUrl || parsed.originalUrl,
     resources: {
       cover: safeCover,

@@ -52,6 +52,33 @@ export interface TwitterConfig {
   maxImages: number
 }
 
+export interface TwitterGrokConfig {
+  enabled: boolean
+  baseUrl: string
+  apiKey: string
+  model: string
+  timeoutMs: number
+}
+
+export interface TwitterRoutingConfig {
+  textProviderOrder: string
+  imageProviderOrder: string
+  videoProviderOrder: string
+  translationProviderOrder: string
+}
+
+export interface TwitterTranslationConfig {
+  enabled: boolean
+  targetLanguage: string
+  maxChars: number
+  showOriginal: boolean
+}
+
+export interface TwitterSendPolicyConfig {
+  forwardTextAndImages: boolean
+  videoAsPlainMessage: boolean
+}
+
 export interface YouTubeConfig {
   enabled: boolean
   rapidApiKey: string
@@ -103,6 +130,10 @@ export interface Config {
   xiaohongshu: XiaohongshuConfig
   bilibili: BilibiliConfig
   twitter: TwitterConfig
+  twitterGrok: TwitterGrokConfig
+  twitterRouting: TwitterRoutingConfig
+  twitterTranslation: TwitterTranslationConfig
+  twitterSendPolicy: TwitterSendPolicyConfig
   youtube: YouTubeConfig
   forward: ForwardConfig
   autoParse: AutoParseConfig
@@ -186,7 +217,7 @@ export const Config: Schema<Config> = Schema.intersect([
       rapidApiHost: Schema.string().default('twitter-x-video-downloader-api.p.rapidapi.com').description('RapidAPI Host（X-RapidAPI-Host）'),
       endpointPath: Schema.string().default('/download').description('RapidAPI 端点路径（如 /download）'),
       maxImages: Schema.number().default(9).min(1).max(20).description('图片推文最多保留图片数量'),
-    }).description('Twitter/X 解析设置'),
+    }).description('Twitter/X 解析设置（RapidAPI）'),
     youtube: Schema.object({
       enabled: Schema.boolean().default(false).description('启用 YouTube 解析（Snap Video RapidAPI）'),
       rapidApiKey: Schema.string().role('secret').default('').description('RapidAPI Key（X-RapidAPI-Key）'),
@@ -207,6 +238,31 @@ export const Config: Schema<Config> = Schema.intersect([
       maxForwardNodes: Schema.number().default(25).min(5).max(80).description('单次合并转发最多节点数'),
     }).description('转发消息设置'),
   }).description('平台解析设置'),
+  Schema.object({
+    twitterGrok: Schema.object({
+      enabled: Schema.boolean().default(false).description('启用 Grok 作为 Twitter/X 文本与图片解析来源'),
+      baseUrl: Schema.string().default('http://127.0.0.1:28000').description('Grok OpenAI 兼容接口地址（不带 /v1/chat/completions 也可）'),
+      apiKey: Schema.string().role('secret').default('').description('Grok 接口 API Key'),
+      model: Schema.dynamic('model').default('grok-4.1-fast').description('Grok 模型（使用 ChatLuna 模型下拉）'),
+      timeoutMs: Schema.number().default(35_000).min(3_000).max(180_000).description('Grok 请求超时（毫秒）'),
+    }).description('Twitter/X Grok 设置'),
+    twitterRouting: Schema.object({
+      textProviderOrder: Schema.string().default('grok,rapidapi').description('文本解析优先级（逗号分隔：grok,rapidapi）'),
+      imageProviderOrder: Schema.string().default('grok,rapidapi').description('图片解析优先级（逗号分隔：grok,rapidapi）'),
+      videoProviderOrder: Schema.string().default('rapidapi,grok').description('视频解析优先级（逗号分隔：rapidapi,grok）'),
+      translationProviderOrder: Schema.string().default('grok,rapidapi').description('翻译优先级（逗号分隔：grok,rapidapi）'),
+    }).description('Twitter/X 路由优先级设置'),
+    twitterTranslation: Schema.object({
+      enabled: Schema.boolean().default(false).description('启用 Twitter/X 正文翻译'),
+      targetLanguage: Schema.string().default('zh-CN').description('翻译目标语言（如 zh-CN）'),
+      maxChars: Schema.number().default(1200).min(80).max(10_000).description('翻译前截断最大字符数'),
+      showOriginal: Schema.boolean().default(true).description('发送时保留原文（关闭后仅展示译文）'),
+    }).description('Twitter/X 翻译设置'),
+    twitterSendPolicy: Schema.object({
+      forwardTextAndImages: Schema.boolean().default(true).description('Twitter/X 图文与译文优先合并转发'),
+      videoAsPlainMessage: Schema.boolean().default(true).description('Twitter/X 视频始终普通消息发送（不进合并转发）'),
+    }).description('Twitter/X 发送策略设置'),
+  }).description('Twitter/X 增强设置'),
   Schema.object({
     autoParse: Schema.object({
       enabled: Schema.boolean().default(true).description('启用自动解析中间件'),
