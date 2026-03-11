@@ -62,7 +62,11 @@ export async function sendParsedContent(
       const shouldForwardVideo = shouldAutoForward || shouldForwardByMediaCount
       if (shouldForwardVideo) {
         const nodes = createForwardTextNodes(intro, session, config)
+        const includeVideoInForward = config.forward.experimentalForwardVideo
         let imageSegments: any[] = []
+        if (includeVideoInForward && nodes.length < config.forward.maxForwardNodes) {
+          nodes.push(h('message', { nickname: config.forward.nickname, userId: session.selfId }, videoElement))
+        }
 
         if (parsed.images.length > 0) {
           imageSegments = await buildImageSegments(ctx, parsed.images, config, logger)
@@ -87,8 +91,9 @@ export async function sendParsedContent(
         if (!forwarded) {
           await sendImagesPlain(session, intro, imageSegments, parsed.musicUrl, config)
         }
-
-        await session.send(videoElement)
+        if (!includeVideoInForward || !forwarded) {
+          await session.send(videoElement)
+        }
       } else {
         await session.send(h.text(intro))
         await session.send(videoElement)

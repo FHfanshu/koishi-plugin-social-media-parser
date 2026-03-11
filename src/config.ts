@@ -66,6 +66,7 @@ export interface ForwardConfig {
   nickname: string
   includeMusic: boolean
   autoMergeForward: boolean
+  experimentalForwardVideo: boolean
   longTextThreshold: number
   imageMergeThreshold: number
   textChunkSize: number
@@ -199,6 +200,7 @@ export const Config: Schema<Config> = Schema.intersect([
       nickname: Schema.string().default('内容解析').description('合并转发显示昵称'),
       includeMusic: Schema.boolean().default(true).description('抖音图文转发时附带背景音乐'),
       autoMergeForward: Schema.boolean().default(true).description('长文本/多图自动合并转发，减少刷屏'),
+      experimentalForwardVideo: Schema.boolean().default(false).description('实验性：允许将视频放入合并转发节点（默认关闭，可能触发平台兼容问题）'),
       longTextThreshold: Schema.number().default(260).min(80).max(2_000).description('触发自动合并转发的文本长度阈值'),
       imageMergeThreshold: Schema.number().default(2).min(1).max(20).description('触发自动合并转发的图片数量阈值'),
       textChunkSize: Schema.number().default(280).min(80).max(1_000).description('合并转发模式下文本分片长度'),
