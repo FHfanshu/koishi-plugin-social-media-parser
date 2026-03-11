@@ -62,12 +62,10 @@ export async function sendParsedContent(
       const shouldForwardVideo = shouldAutoForward || shouldForwardByMediaCount
       if (shouldForwardVideo) {
         const nodes = createForwardTextNodes(intro, session, config)
-        if (nodes.length < config.forward.maxForwardNodes) {
-          nodes.push(h('message', { nickname: config.forward.nickname, userId: session.selfId }, videoElement))
-        }
+        let imageSegments: any[] = []
 
         if (parsed.images.length > 0) {
-          const imageSegments = await buildImageSegments(ctx, parsed.images, config, logger)
+          imageSegments = await buildImageSegments(ctx, parsed.images, config, logger)
           for (const image of imageSegments) {
             if (nodes.length >= config.forward.maxForwardNodes) {
               break
@@ -87,8 +85,10 @@ export async function sendParsedContent(
 
         const forwarded = await sendForwardNodes(ctx, session, nodes, config, logger)
         if (!forwarded) {
-          await sendVideoPlainFallback(ctx, session, intro, videoElement, parsed, config, logger)
+          await sendImagesPlain(session, intro, imageSegments, parsed.musicUrl, config)
         }
+
+        await session.send(videoElement)
       } else {
         await session.send(h.text(intro))
         await session.send(videoElement)
@@ -520,30 +520,6 @@ async function inlineForwardImage(
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function sendVideoPlainFallback(
-  ctx: Context,
-  session: Session,
-  intro: string,
-  videoElement: any,
-  parsed: ParsedContent,
-  config: Config,
-  logger: Logger
-): Promise<void> {
-  await session.send(h.text(intro))
-  await session.send(videoElement)
-
-  if (parsed.images.length > 0) {
-    const imageSegments = await buildImageSegments(ctx, parsed.images, config, logger)
-    if (imageSegments.length) {
-      await session.send(imageSegments)
-    }
-  }
-
-  if (config.forward.includeMusic && parsed.musicUrl) {
-    await session.send(h('audio', { src: parsed.musicUrl }))
-  }
 }
 
 async function sendImagesPlain(
