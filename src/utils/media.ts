@@ -51,8 +51,8 @@ export async function sendParsedContent(
       const shouldForwardVideo = isOneBot && config.forward.enabled
 
       if (shouldForwardVideo) {
-        const forwarded = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
-        if (forwarded) {
+        const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
+        if (forwardMode === 'full') {
           await sendMediaPlain(session, [], parsed.musicUrl, config, logger)
         } else {
           await sendMediaPlain(session, imageSegments, parsed.musicUrl, config, logger)
@@ -73,8 +73,8 @@ export async function sendParsedContent(
     const shouldForwardImages = isOneBot && config.forward.enabled
 
     if (shouldForwardImages) {
-      const forwarded = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
-      if (forwarded) {
+      const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
+      if (forwardMode === 'full') {
         await sendMediaPlain(session, [], parsed.musicUrl, config, logger)
       } else {
         await sendMediaPlain(session, imageSegments, parsed.musicUrl, config, logger)
@@ -627,6 +627,8 @@ async function sendForwardIntroOrPlain(
   await sendIntroPlain(session, intro)
 }
 
+type ForwardContentMode = 'full' | 'text-only' | 'none'
+
 async function sendForwardContentOrPlain(
   ctx: Context,
   session: Session,
@@ -634,14 +636,25 @@ async function sendForwardContentOrPlain(
   imageSegments: any[],
   config: Config,
   logger: Logger
-): Promise<boolean> {
-  const nodes = createForwardContentNodes(intro, imageSegments, session, config)
-  if (nodes.length && await sendForwardNodes(ctx, session, nodes, config, logger)) {
-    return true
+): Promise<ForwardContentMode> {
+  const contentNodes = createForwardContentNodes(intro, imageSegments, session, config)
+  if (contentNodes.length && await sendForwardNodes(ctx, session, contentNodes, config, logger)) {
+    return 'full'
+  }
+
+  // OneBot can fail on image nodes in merged forward. Fallback to text-only forward first.
+  if (imageSegments.length) {
+    const textNodes = createForwardTextNodes(intro, session, config)
+    if (textNodes.length && await sendForwardNodes(ctx, session, textNodes, config, logger)) {
+      if (config.debug) {
+        logger.info('forward fallback: text-only merged forward succeeded, images will be sent as plain messages')
+      }
+      return 'text-only'
+    }
   }
 
   await sendIntroPlain(session, intro)
-  return false
+  return 'none'
 }
 
 async function sendIntroPlain(session: Session, intro: string): Promise<void> {
