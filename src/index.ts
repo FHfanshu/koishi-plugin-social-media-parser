@@ -1,6 +1,6 @@
 import path from 'node:path'
 
-import type { Context } from 'koishi'
+import type { Context, Logger } from 'koishi'
 
 import { Config, migrateConfig } from './config'
 import type { Config as PluginConfig } from './config'
@@ -75,6 +75,10 @@ export function apply(ctx: Context, config: PluginConfig): void {
   }
 
   const { config: resolvedConfig, usedLegacyKeys } = migrateConfig(config)
+  if (resolvedConfig.debug) {
+    promoteDebugLogsToInfo(logger)
+  }
+
   if (usedLegacyKeys.length > 0) {
     logger.warn(`检测到旧版配置键，已自动迁移: ${usedLegacyKeys.join(', ')}`)
   }
@@ -109,6 +113,16 @@ export function apply(ctx: Context, config: PluginConfig): void {
   })
 
   logger.info('social-media-parser 插件已加载')
+}
+
+function promoteDebugLogsToInfo(logger: Logger): void {
+  const patchedLogger = logger as Logger & { __debugPromotedToInfo?: boolean }
+  if (patchedLogger.__debugPromotedToInfo) {
+    return
+  }
+
+  patchedLogger.__debugPromotedToInfo = true
+  logger.debug = logger.info.bind(logger) as Logger['debug']
 }
 
 function deriveFfprobePathFromFfmpeg(ffmpegPath: unknown): string | null {
