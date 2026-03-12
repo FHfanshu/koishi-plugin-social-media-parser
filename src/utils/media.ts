@@ -501,6 +501,13 @@ async function trySendForward(
   logger: Logger,
   label: string
 ): Promise<boolean> {
+  if (session.platform === 'onebot') {
+    const forwarded = await trySendForwardViaOneBotApi(session, nodes, logger, label)
+    if (forwarded) {
+      return true
+    }
+  }
+
   try {
     await session.send(h('message', { forward: true }, nodes))
     return true
@@ -508,6 +515,201 @@ async function trySendForward(
     logger.debug(`forward send failed (${label}): ${String((error as Error)?.message || error)}`)
     return false
   }
+}
+
+async function trySendForwardViaOneBotApi(
+  session: Session,
+  nodes: any[],
+  logger: Logger,
+  label: string
+): Promise<boolean> {
+  const onebotNodes = toOneBotForwardNodes(nodes, session)
+  if (!onebotNodes.length) {
+    return false
+  }
+
+  const target = resolveOneBotForwardTarget(session)
+  if (!target) {
+    logger.debug(`forward onebot api skipped (${label}): missing target`)
+    return false
+  }
+
+  const internal = (session as any).bot?.internal
+  if (!internal) {
+    logger.debug(`forward onebot api skipped (${label}): missing internal api`)
+    return false
+  }
+
+  try {
+    if (target.type === 'group') {
+      await callOneBotApi(internal, 'send_group_forward_msg', {
+        group_id: target.id,
+        message_seq: 0,
+        messages: onebotNodes,
+      })
+    } else {
+      await callOneBotApi(internal, 'send_private_forward_msg', {
+        user_id: target.id,
+        message_seq: 0,
+        messages: onebotNodes,
+      })
+    }
+
+    return true
+  } catch (error) {
+    logger.debug(`forward onebot api failed (${label}): ${String((error as Error)?.message || error)}`)
+    return false
+  }
+}
+
+async function callOneBotApi(
+  internal: any,
+  action: string,
+  params: Record<string, unknown>
+): Promise<any> {
+  if (typeof internal._get === 'function') {
+    return internal._get(action, params)
+  }
+  if (typeof internal.request === 'function') {
+    return internal.request(action, params)
+  }
+  if (typeof internal.callAction === 'function') {
+    return internal.callAction(action, params)
+  }
+  if (typeof internal.sendAction === 'function') {
+    return internal.sendAction(action, params)
+  }
+
+  throw new Error(`onebot internal api unsupported action: ${action}`)
+}
+
+function resolveOneBotForwardTarget(session: Session): { type: 'group' | 'private', id: string } | null {
+  const channelId = `${session.channelId || ''}`.trim()
+  const guildId = `${session.guildId || ''}`.trim()
+  const userId = `${session.userId || ''}`.trim()
+
+  const privateUserId = userId || channelId.replace(/^private:/, '')
+  if (session.isDirect && privateUserId) {
+    return { type: 'private', id: privateUserId }
+  }
+
+  const groupId = guildId || channelId
+  if (groupId) {
+    return { type: 'group', id: groupId }
+  }
+
+  if (privateUserId) {
+    return { type: 'private', id: privateUserId }
+  }
+
+  return null
+}
+
+function toOneBotForwardNodes(nodes: any[], session: Session): Array<{
+  type: 'node'
+  data: {
+    user_id: string
+    nickname: string
+    message_seq: number
+    content: Array<{ type: string, data: Record<string, unknown> }>
+  }
+}> {
+  const result: Array<{
+    type: 'node'
+    data: {
+      user_id: string
+      nickname: string
+      message_seq: number
+      content: Array<{ type: string, data: Record<string, unknown> }>
+    }
+  }> = []
+
+  for (const node of nodes) {
+    if (!node || typeof node !== 'object' || node.type !== 'message') {
+      continue
+    }
+
+    const attrs = (node.attrs && typeof node.attrs === 'object') ? node.attrs : {}
+    const userId = `${attrs.userId || session.selfId || ''}`.trim()
+    const nickname = `${attrs.nickname || attrs.username || '内容解析'}`.trim() || '内容解析'
+    const content = toOneBotSegments(node.children)
+    if (!content.length) {
+      continue
+    }
+
+    result.push({
+      type: 'node',
+      data: {
+        user_id: userId || `${session.selfId || ''}`.trim() || '0',
+        nickname,
+        message_seq: 0,
+        content,
+      },
+    })
+  }
+
+  return result
+}
+
+function toOneBotSegments(children: any): Array<{ type: string, data: Record<string, unknown> }> {
+  const list = Array.isArray(children) ? children : (children != null ? [children] : [])
+  const segments: Array<{ type: string, data: Record<string, unknown> }> = []
+
+  for (const child of list) {
+    if (typeof child === 'string') {
+      if (child) {
+        segments.push({ type: 'text', data: { text: child } })
+      }
+      continue
+    }
+
+    if (!child || typeof child !== 'object') {
+      continue
+    }
+
+    const type = `${child.type || ''}`.trim()
+    const attrs = (child.attrs && typeof child.attrs === 'object') ? child.attrs : {}
+
+    if (type === 'text') {
+      const text = `${attrs.content || ''}`
+      if (text) {
+        segments.push({ type: 'text', data: { text } })
+      }
+      continue
+    }
+
+    if (type === 'br') {
+      segments.push({ type: 'text', data: { text: '\n' } })
+      continue
+    }
+
+    if (type === 'img' || type === 'image') {
+      const source = normalizeOneBotImageFile(attrs)
+      if (source) {
+        segments.push({ type: 'image', data: { file: source } })
+      }
+      continue
+    }
+
+    if (Array.isArray(child.children) && child.children.length > 0) {
+      segments.push(...toOneBotSegments(child.children))
+    }
+  }
+
+  return segments
+}
+
+function normalizeOneBotImageFile(attrs: Record<string, unknown>): string {
+  const source = `${attrs.src || attrs.url || attrs.file || ''}`.trim()
+  if (!source) {
+    return ''
+  }
+
+  if (source.startsWith('base64://')) {
+    return `data:image/jpeg;base64,${source.slice('base64://'.length)}`
+  }
+
+  return source
 }
 
 async function rewriteForwardNodesForRetry(
