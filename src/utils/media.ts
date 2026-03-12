@@ -46,7 +46,7 @@ export async function sendParsedContent(
       logger.info(`video unavailable or skipped, fallback to image/text: ${primaryVideo}`)
     } else {
       const imageSegments = parsed.images.length > 0
-        ? await buildImageSegments(ctx, parsed.images, config, logger)
+        ? await buildImageSegments(ctx, parsed.images, config, logger, isOneBot)
         : []
       const shouldForwardVideo = isOneBot && config.forward.enabled
 
@@ -69,7 +69,7 @@ export async function sendParsedContent(
   }
 
   if (parsed.images.length > 0) {
-    const imageSegments = await buildImageSegments(ctx, parsed.images, config, logger)
+    const imageSegments = await buildImageSegments(ctx, parsed.images, config, logger, isOneBot)
     const shouldForwardImages = isOneBot && config.forward.enabled
 
     if (shouldForwardImages) {
@@ -354,13 +354,28 @@ async function buildImageSegments(
   ctx: Context,
   urls: string[],
   config: Config,
-  logger: Logger
+  logger: Logger,
+  preferDataUriForTwitterOnOneBot = false,
 ): Promise<any[]> {
   const imageSegments = [] as any[]
   for (const url of urls) {
+    if (!isSafePublicHttpUrl(url)) {
+      logger.warn(`image send skipped by url safety policy: ${url}`)
+      continue
+    }
+
     if (config.media.sendMode === 'url') {
-      if (!isSafePublicHttpUrl(url)) {
-        logger.warn(`image send skipped by url safety policy: ${url}`)
+      if (preferDataUriForTwitterOnOneBot && isTwitterMediaUrl(url)) {
+        try {
+          const downloaded = await downloadImageForSend(ctx, url, config)
+          imageSegments.push(segment.image(toDataUri(downloaded.mimeType || 'image/jpeg', downloaded.buffer)))
+        } catch (error) {
+          logger.warn(`image inline failed for twitter/x on onebot: ${String((error as Error)?.message || error)}`)
+          if (!config.media.fallbackToUrlOnError) {
+            throw error
+          }
+          logger.warn(`image fallback skipped: remote Twitter/X image URL is unstable on OneBot, url=${url}`)
+        }
         continue
       }
 
@@ -374,11 +389,6 @@ async function buildImageSegments(
       logger.debug(`image base64 send failed: ${String((error as Error)?.message || error)}`)
       if (!config.media.fallbackToUrlOnError) {
         throw error
-      }
-
-      if (!isSafePublicHttpUrl(url)) {
-        logger.warn(`image fallback skipped by url safety policy: ${url}`)
-        continue
       }
 
       if (isTwitterMediaUrl(url)) {
