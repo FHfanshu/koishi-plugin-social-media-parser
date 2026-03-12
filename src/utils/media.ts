@@ -48,7 +48,7 @@ export async function sendParsedContent(
       logger.info(`video unavailable or skipped, fallback to image/text: ${primaryVideo}`)
     } else {
       const imageSegments = imageUrls.length > 0
-        ? await buildImageSegments(ctx, imageUrls, config, logger, isOneBot)
+        ? await buildImageSegments(ctx, imageUrls, config, logger)
         : []
       const shouldForwardVideo = isOneBot && config.forward.enabled
       const forwardImageSegments = forceTextOnlyForwardForImages ? [] : imageSegments
@@ -73,7 +73,7 @@ export async function sendParsedContent(
   }
 
   if (imageUrls.length > 0) {
-    const imageSegments = await buildImageSegments(ctx, imageUrls, config, logger, isOneBot)
+    const imageSegments = await buildImageSegments(ctx, imageUrls, config, logger)
     const shouldForwardImages = isOneBot && config.forward.enabled
     const forwardImageSegments = forceTextOnlyForwardForImages ? [] : imageSegments
 
@@ -373,7 +373,6 @@ async function buildImageSegments(
   urls: string[],
   config: Config,
   logger: Logger,
-  preferDataUriForTwitterOnOneBot = false,
 ): Promise<any[]> {
   const imageSegments = [] as any[]
   for (const url of urls) {
@@ -382,46 +381,14 @@ async function buildImageSegments(
       continue
     }
 
-    if (preferDataUriForTwitterOnOneBot && isTwitterMediaUrl(url)) {
-      // OneBot + Twitter/X: direct url first, then fallback chain on send failure.
-      imageSegments.push(segment.image(url))
-      continue
-    }
-
-    if (config.media.sendMode === 'url') {
-      imageSegments.push(segment.image(url))
-      continue
-    }
-
-    try {
-      imageSegments.push(await buildImageSegment(ctx, url, config, logger))
-    } catch (error) {
-      logger.debug(`image prepare failed: ${String((error as Error)?.message || error)}`)
-      if (!config.media.fallbackToUrlOnError) {
-        throw error
-      }
-
-      logger.warn(`image prepare fallback to direct url: ${url}`)
-      imageSegments.push(segment.image(url))
-    }
+    // Global image send strategy:
+    // 1) direct url first
+    // 2) if sending fails: download -> storage url
+    // 3) fallback: download -> base64
+    imageSegments.push(segment.image(url))
   }
 
   return imageSegments
-}
-
-async function buildImageSegment(
-  ctx: Context,
-  url: string,
-  config: Config,
-  logger: Logger
-): Promise<any> {
-  const downloaded = await downloadImageForSend(ctx, url, config)
-  if (config.media.sendMode === 'base64') {
-    return segment.image(toDataUri(downloaded.mimeType || 'image/jpeg', downloaded.buffer))
-  }
-
-  const storedUrl = await toMediaUrl(ctx, downloaded.mimeType, downloaded.buffer, 'send_img', logger)
-  return segment.image(storedUrl)
 }
 
 async function downloadImageForSend(
@@ -496,18 +463,16 @@ async function sendForwardNodes(
   }
 
   const safeNodes = nodes.slice(0, config.forward.maxForwardNodes)
-  const primaryNodes = session.platform === 'onebot'
-    ? await rewriteForwardNodesForRetry(ctx, safeNodes, config, logger)
-    : safeNodes
+  const primaryNodes = safeNodes
 
   if (await trySendForward(session, primaryNodes, logger, 'primary')) {
     return true
   }
 
   await sleep(600)
-  const retryNodes = primaryNodes === safeNodes
+  const retryNodes = session.platform === 'onebot'
     ? await rewriteForwardNodesForRetry(ctx, safeNodes, config, logger)
-    : primaryNodes
+    : safeNodes
   return trySendForward(session, retryNodes, logger, 'retry')
 }
 
@@ -794,22 +759,16 @@ async function inlineForwardImage(
   config: Config,
   logger: Logger
 ): Promise<string | null> {
-  const referer = inferMediaReferer(url)
   try {
-    const downloaded = await downloadBuffer(ctx, url, config.network.timeoutMs, {
-      headers: referer
-        ? {
-            referer,
-            accept: '*/*',
-          }
-        : {
-            accept: '*/*',
-          },
-      maxBytes: config.media.maxBytes,
-    })
-    return `data:${downloaded.mimeType || 'image/jpeg'};base64,${downloaded.buffer.toString('base64')}`
+    const downloaded = await downloadImageForSend(ctx, url, config)
+    const mimeType = downloaded.mimeType || 'image/jpeg'
+    const storedUrl = await toMediaUrl(ctx, mimeType, downloaded.buffer, 'forward_img', logger)
+    if (isHttpMediaUrl(storedUrl) && storedUrl !== url) {
+      return storedUrl
+    }
+    return toDataUri(mimeType, downloaded.buffer)
   } catch (error) {
-    logger.debug(`forward image inline retry skipped: ${String((error as Error)?.message || error)}`)
+    logger.debug(`forward image fallback pipeline skipped: ${String((error as Error)?.message || error)}`)
     return null
   }
 }
@@ -935,16 +894,13 @@ async function buildImageSendFallbackAfterDirectFailure(
 
   try {
     const downloaded = await downloadImageForSend(ctx, source, config)
-    if (config.media.sendMode === 'base64') {
-      return segment.image(toDataUri(downloaded.mimeType || 'image/jpeg', downloaded.buffer))
-    }
-
-    const storedUrl = await toMediaUrl(ctx, downloaded.mimeType, downloaded.buffer, 'send_img', logger)
-    if (storedUrl && storedUrl !== source) {
+    const mimeType = downloaded.mimeType || 'image/jpeg'
+    const storedUrl = await toMediaUrl(ctx, mimeType, downloaded.buffer, 'send_img', logger)
+    if (isHttpMediaUrl(storedUrl) && storedUrl !== source) {
       return segment.image(storedUrl)
     }
 
-    return segment.image(toDataUri(downloaded.mimeType || 'image/jpeg', downloaded.buffer))
+    return segment.image(toDataUri(mimeType, downloaded.buffer))
   } catch (error) {
     logger.warn(`image fallback pipeline failed: ${String((error as Error)?.message || error)}`)
     return null
@@ -969,6 +925,10 @@ function resolveImageSegmentSource(imageSegment: any): string {
   }
 
   return source
+}
+
+function isHttpMediaUrl(input: string): boolean {
+  return input.startsWith('http://') || input.startsWith('https://')
 }
 
 function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: string, config: Config): string {
