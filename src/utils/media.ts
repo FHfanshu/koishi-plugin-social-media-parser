@@ -21,6 +21,7 @@ export async function sendParsedContent(
   const sourceUrl = simplifyDisplayUrl(parsed.resolvedUrl || parsed.originalUrl)
   const platformName = getPlatformName(parsed.platform)
   const intro = buildIntroText(platformName, parsed, sourceUrl, config)
+  const imageUrls = resolveImageUrlsForSend(parsed, config)
 
   const shouldAutoForward =
     isOneBot
@@ -28,10 +29,10 @@ export async function sendParsedContent(
     && config.forward.autoMergeForward
     && (
       intro.length >= config.forward.longTextThreshold
-      || parsed.images.length >= config.forward.imageMergeThreshold
+      || imageUrls.length >= config.forward.imageMergeThreshold
     )
 
-  const mediaFileCount = parsed.images.length + parsed.videos.length + (config.forward.includeMusic && parsed.musicUrl ? 1 : 0)
+  const mediaFileCount = imageUrls.length + parsed.videos.length + (config.forward.includeMusic && parsed.musicUrl ? 1 : 0)
   const shouldForwardByMediaCount =
     isOneBot
     && config.forward.enabled
@@ -45,22 +46,22 @@ export async function sendParsedContent(
     if (!videoElement) {
       logger.info(`video unavailable or skipped, fallback to image/text: ${primaryVideo}`)
     } else {
-      const imageSegments = parsed.images.length > 0
-        ? await buildImageSegments(ctx, parsed.images, config, logger, isOneBot)
+      const imageSegments = imageUrls.length > 0
+        ? await buildImageSegments(ctx, imageUrls, config, logger, isOneBot)
         : []
       const shouldForwardVideo = isOneBot && config.forward.enabled
 
       if (shouldForwardVideo) {
         const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
         if (forwardMode === 'full') {
-          await sendMediaPlain(session, [], parsed.musicUrl, config, logger)
+          await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
         } else {
-          await sendMediaPlain(session, imageSegments, parsed.musicUrl, config, logger)
+          await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
         }
         await session.send(videoElement)
       } else {
         await sendIntroPlain(session, intro)
-        await sendMediaPlain(session, imageSegments, parsed.musicUrl, config, logger)
+        await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
         await session.send(videoElement)
       }
 
@@ -68,22 +69,22 @@ export async function sendParsedContent(
     }
   }
 
-  if (parsed.images.length > 0) {
-    const imageSegments = await buildImageSegments(ctx, parsed.images, config, logger, isOneBot)
+  if (imageUrls.length > 0) {
+    const imageSegments = await buildImageSegments(ctx, imageUrls, config, logger, isOneBot)
     const shouldForwardImages = isOneBot && config.forward.enabled
 
     if (shouldForwardImages) {
       const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
       if (forwardMode === 'full') {
-        await sendMediaPlain(session, [], parsed.musicUrl, config, logger)
+        await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
       } else {
-        await sendMediaPlain(session, imageSegments, parsed.musicUrl, config, logger)
+        await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
       }
       return
     }
 
     await sendIntroPlain(session, intro)
-    await sendMediaPlain(session, imageSegments, parsed.musicUrl, config, logger)
+    await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
     return
   }
 
@@ -97,13 +98,13 @@ export async function sendParsedContent(
     const nodes = createForwardTextNodes(intro, session, config)
     const forwarded = await sendForwardNodes(ctx, session, nodes, config, logger)
     if (forwarded) {
-      await sendMediaPlain(session, [], parsed.musicUrl, config, logger)
+      await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
       return
     }
   }
 
   await sendIntroPlain(session, intro)
-  await sendMediaPlain(session, [], parsed.musicUrl, config, logger)
+  await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
 }
 
 function getPlatformName(platform: ParsedContent['platform']): string {
@@ -117,6 +118,18 @@ function getPlatformName(platform: ParsedContent['platform']): string {
     default:
       return '小红书'
   }
+}
+
+function resolveImageUrlsForSend(parsed: ParsedContent, config: Config): string[] {
+  const primary = Array.isArray(parsed.images) ? parsed.images : []
+  if (parsed.platform !== 'twitter') {
+    return dedupeUrls(primary)
+  }
+
+  const fallback = Array.isArray(parsed.imageFallbackUrls) ? parsed.imageFallbackUrls : []
+  const merged = dedupeUrls([...primary, ...fallback])
+  const limit = Math.max(1, config.platforms.twitter.maxImages || 1)
+  return merged.slice(0, limit)
 }
 
 async function buildVideoElement(
@@ -364,21 +377,13 @@ async function buildImageSegments(
       continue
     }
 
-    if (config.media.sendMode === 'url') {
-      if (preferDataUriForTwitterOnOneBot && isTwitterMediaUrl(url)) {
-        try {
-          const downloaded = await downloadImageForSend(ctx, url, config)
-          imageSegments.push(segment.image(toDataUri(downloaded.mimeType || 'image/jpeg', downloaded.buffer)))
-        } catch (error) {
-          logger.warn(`image inline failed for twitter/x on onebot: ${String((error as Error)?.message || error)}`)
-          if (!config.media.fallbackToUrlOnError) {
-            throw error
-          }
-          logger.warn(`image fallback skipped: remote Twitter/X image URL is unstable on OneBot, url=${url}`)
-        }
-        continue
-      }
+    if (preferDataUriForTwitterOnOneBot && isTwitterMediaUrl(url)) {
+      // OneBot + Twitter/X: direct url first, then fallback chain on send failure.
+      imageSegments.push(segment.image(url))
+      continue
+    }
 
+    if (config.media.sendMode === 'url') {
       imageSegments.push(segment.image(url))
       continue
     }
@@ -386,16 +391,12 @@ async function buildImageSegments(
     try {
       imageSegments.push(await buildImageSegment(ctx, url, config, logger))
     } catch (error) {
-      logger.debug(`image base64 send failed: ${String((error as Error)?.message || error)}`)
+      logger.debug(`image prepare failed: ${String((error as Error)?.message || error)}`)
       if (!config.media.fallbackToUrlOnError) {
         throw error
       }
 
-      if (isTwitterMediaUrl(url)) {
-        logger.warn(`image fallback skipped: remote Twitter/X image URL is unstable on OneBot, url=${url}`)
-        continue
-      }
-
+      logger.warn(`image prepare fallback to direct url: ${url}`)
       imageSegments.push(segment.image(url))
     }
   }
@@ -813,6 +814,7 @@ async function sleep(ms: number): Promise<void> {
 }
 
 async function sendImagesPlain(
+  ctx: Context,
   session: Session,
   intro: string,
   imageSegments: any[],
@@ -821,7 +823,7 @@ async function sendImagesPlain(
   logger: Logger
 ): Promise<void> {
   await sendIntroPlain(session, intro)
-  await sendMediaPlain(session, imageSegments, musicUrl, config, logger)
+  await sendMediaPlain(ctx, session, imageSegments, musicUrl, config, logger)
 }
 
 async function sendForwardIntroOrPlain(
@@ -878,6 +880,7 @@ async function sendIntroPlain(session: Session, intro: string): Promise<void> {
 }
 
 async function sendMediaPlain(
+  ctx: Context,
   session: Session,
   imageSegments: any[],
   musicUrl: string | undefined,
@@ -893,6 +896,16 @@ async function sendMediaPlain(
         try {
           await session.send(imageSegment)
         } catch (singleError) {
+          const fallbackSegment = await buildImageSendFallbackAfterDirectFailure(ctx, imageSegment, config, logger)
+          if (fallbackSegment) {
+            try {
+              await session.send(fallbackSegment)
+              continue
+            } catch (fallbackError) {
+              logger.warn(`image fallback send failed: ${String((fallbackError as Error)?.message || fallbackError)}`)
+            }
+          }
+
           logger.warn(`image send skipped after retry: ${String((singleError as Error)?.message || singleError)}`)
         }
       }
@@ -902,6 +915,55 @@ async function sendMediaPlain(
   if (config.forward.includeMusic && musicUrl) {
     await session.send(h('audio', { src: musicUrl }))
   }
+}
+
+async function buildImageSendFallbackAfterDirectFailure(
+  ctx: Context,
+  imageSegment: any,
+  config: Config,
+  logger: Logger
+): Promise<any | null> {
+  const source = resolveImageSegmentSource(imageSegment)
+  if (!source || !isSafePublicHttpUrl(source)) {
+    return null
+  }
+
+  try {
+    const downloaded = await downloadImageForSend(ctx, source, config)
+    if (config.media.sendMode === 'base64') {
+      return segment.image(toDataUri(downloaded.mimeType || 'image/jpeg', downloaded.buffer))
+    }
+
+    const storedUrl = await toMediaUrl(ctx, downloaded.mimeType, downloaded.buffer, 'send_img', logger)
+    if (storedUrl && storedUrl !== source) {
+      return segment.image(storedUrl)
+    }
+
+    return segment.image(toDataUri(downloaded.mimeType || 'image/jpeg', downloaded.buffer))
+  } catch (error) {
+    logger.warn(`image fallback pipeline failed: ${String((error as Error)?.message || error)}`)
+    return null
+  }
+}
+
+function resolveImageSegmentSource(imageSegment: any): string {
+  if (!imageSegment || typeof imageSegment !== 'object') {
+    return ''
+  }
+
+  const attrs = imageSegment.attrs && typeof imageSegment.attrs === 'object'
+    ? imageSegment.attrs as Record<string, unknown>
+    : null
+  if (!attrs) {
+    return ''
+  }
+
+  const source = `${attrs.src || attrs.url || attrs.file || ''}`.trim()
+  if (!source || source.startsWith('data:') || source.startsWith('base64://')) {
+    return ''
+  }
+
+  return source
 }
 
 function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: string, config: Config): string {
@@ -928,6 +990,20 @@ function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: 
     originalText,
     sourceUrl,
   ].filter(Boolean).join('\n\n')
+}
+
+function dedupeUrls(urls: string[]): string[] {
+  const result: string[] = []
+  const seen = new Set<string>()
+  for (const item of urls) {
+    const value = `${item || ''}`.trim()
+    if (!value || seen.has(value)) {
+      continue
+    }
+    seen.add(value)
+    result.push(value)
+  }
+  return result
 }
 
 function truncateText(text: string, maxLength: number): string {

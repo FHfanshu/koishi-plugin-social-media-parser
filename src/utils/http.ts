@@ -17,6 +17,7 @@ export interface DownloadOptions {
 }
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+const TRUSTED_PUBLIC_MEDIA_HOST_RE = /(^|\.)((twimg\.com)|(x\.com)|(twitter\.com)|(t\.co))$/i
 
 export async function resolveRedirect(
   ctx: Context,
@@ -210,8 +211,19 @@ async function assertSafeExternalUrl(ctx: Context, url: string, allowPrivate: bo
     throw new Error(`blocked unsafe media url: ${url}`)
   }
 
+  let hostname = ''
+  try {
+    hostname = new URL(url).hostname.toLowerCase()
+  } catch {
+    hostname = ''
+  }
+
   const isLocalChecker = (ctx as any).http?.isLocal
   if (typeof isLocalChecker === 'function') {
+    if (hostname && TRUSTED_PUBLIC_MEDIA_HOST_RE.test(hostname)) {
+      return
+    }
+
     const isLocal = await Promise
       .resolve(isLocalChecker.call((ctx as any).http, url))
       .catch(() => false)

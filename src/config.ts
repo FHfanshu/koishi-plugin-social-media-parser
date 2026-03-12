@@ -148,6 +148,7 @@ export const Config: Schema<Config> = Schema.intersect([
       maxDurationSec: Schema.number().default(1800).min(60).max(7200).description('视频最大时长（秒），超出则跳过解析。默认 1800 秒（30 分钟）'),
       sendMode: Schema.union([
         Schema.const('base64').description('下载后转 base64 发送（更稳定）'),
+        Schema.const('storage').description('下载后优先交给 chatluna storage service 托管；无 storage 时回退 base64'),
         Schema.const('url').description('直接发送 URL（更省流量）')
       ]).default('base64').description('消息发送模式'),
       videoSendMode: Schema.union([

@@ -1,6 +1,6 @@
 export type SocialPlatform = 'douyin' | 'xiaohongshu' | 'bilibili' | 'twitter'
 
-export type SendMode = 'base64' | 'url'
+export type SendMode = 'base64' | 'storage' | 'url'
 
 export type VideoSendMode = 'storage' | 'base64' | 'url'
 
@@ -13,6 +13,7 @@ export interface ParsedContent {
   content: string
   translatedContent?: string
   images: string[]
+  imageFallbackUrls?: string[]
   videos: string[]
   textProvider?: TwitterProvider
   imageProvider?: TwitterProvider

@@ -114,6 +114,7 @@ export async function parseTwitter(
     content,
     translatedContent: translatedContent || undefined,
     images: imagesResolved.value,
+    imageFallbackUrls: imagesResolved.fallback,
     videos: videosResolved.value,
     textProvider: textResolved.provider,
     imageProvider: imagesResolved.provider,
@@ -170,35 +171,46 @@ async function resolveImagesByOrder(
   fetchFxTwitter: () => Promise<FxTwitterResult | null>,
   fetchGrok: () => Promise<GrokResult | null>,
   maxImages: number
-): Promise<{ value: string[]; provider?: TwitterProvider }> {
+): Promise<{ value: string[]; provider?: TwitterProvider; fallback: string[] }> {
   const limit = Math.max(1, maxImages || 1)
+  let primaryProvider: TwitterProvider | undefined
+  const primaryImages: string[] = []
+  const fallbackImages: string[] = []
+
   for (const provider of order) {
+    let images: string[] = []
+
     if (provider === 'fxtwitter') {
       const fx = await fetchFxTwitter()
-      const images = dedupe(fx?.images || []).slice(0, limit)
-      if (images.length) {
-        return {
-          value: images,
-          provider,
-        }
-      }
+      images = dedupe(fx?.images || [])
+    } else if (provider === 'grok') {
+      const grok = await fetchGrok()
+      images = dedupe(grok?.images || [])
+    }
+
+    if (!images.length) {
       continue
     }
 
-    if (provider === 'grok') {
-      const grok = await fetchGrok()
-      const images = dedupe(grok?.images || []).slice(0, limit)
-      if (images.length) {
-        return {
-          value: images,
-          provider,
-        }
-      }
+    if (!primaryProvider) {
+      primaryProvider = provider
+      primaryImages.push(...images)
+      continue
     }
+
+    fallbackImages.push(...images)
   }
 
+  const value = dedupe(primaryImages).slice(0, limit)
+  const fallback = dedupe([
+    ...fallbackImages,
+    ...primaryImages.slice(limit),
+  ]).filter((item) => !value.includes(item))
+
   return {
-    value: [],
+    value,
+    provider: primaryProvider,
+    fallback,
   }
 }
 
