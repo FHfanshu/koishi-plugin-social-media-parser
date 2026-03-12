@@ -234,10 +234,13 @@ export function extractSocialUrlsFromSession(session: Session): string[] {
 }
 
 export function isBlocked(session: Session, blockedGuilds: string[], blockedUsers: string[]): boolean {
+  return isGuildBlocked(session, blockedGuilds) || isUserBlocked(session, blockedUsers)
+}
+
+export function isGuildBlocked(session: Session, blockedGuilds: string[]): boolean {
   const platform = typeof session.platform === 'string' ? session.platform : ''
   const guildId = typeof session.guildId === 'string' ? session.guildId : ''
   const channelId = typeof session.channelId === 'string' ? session.channelId : ''
-  const userId = typeof session.userId === 'string' ? session.userId : ''
 
   if (matchId(guildId, platform, blockedGuilds)) {
     return true
@@ -245,6 +248,13 @@ export function isBlocked(session: Session, blockedGuilds: string[], blockedUser
   if (matchId(channelId, platform, blockedGuilds)) {
     return true
   }
+
+  return false
+}
+
+export function isUserBlocked(session: Session, blockedUsers: string[]): boolean {
+  const platform = typeof session.platform === 'string' ? session.platform : ''
+  const userId = typeof session.userId === 'string' ? session.userId : ''
   if (matchId(userId, platform, blockedUsers)) {
     return true
   }

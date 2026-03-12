@@ -41,6 +41,7 @@ export interface DouyinConfig {
     fallbackUrls: string[]
   }
   maxImages: number
+  autoParseBlockedGuilds: string[]
 }
 
 export interface XiaohongshuConfig {
@@ -48,12 +49,14 @@ export interface XiaohongshuConfig {
   userAgent: string
   maxRetries: number
   maxImages: number
+  autoParseBlockedGuilds: string[]
 }
 
 export interface BilibiliConfig {
   enabled: boolean
   fetchVideo: boolean
   maxDescLength: number
+  autoParseBlockedGuilds: string[]
 }
 
 export interface TwitterConfig {
@@ -78,6 +81,7 @@ export interface TwitterConfig {
     maxChars: number
     showOriginal: boolean
   }
+  autoParseBlockedGuilds: string[]
 }
 
 export interface PlatformsConfig {
@@ -102,7 +106,7 @@ export interface AutoParseConfig {
   enabled: boolean
   onlyGroup: boolean
   blacklist: {
-    guilds: string[]
+    guilds: string[] // legacy global guild blacklist, kept for backward compatibility
     users: string[]
   }
   maxUrlsPerMessage: number
@@ -163,17 +167,20 @@ export const Config: Schema<Config> = Schema.intersect([
           fallbackUrls: Schema.array(String).role('table').default([]).description('抖音解析备用 API 地址列表（按顺序回退）'),
         }).description('抖音 API 设置'),
         maxImages: Schema.number().default(9).min(1).max(20).description('图文最多保留图片数量'),
+        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（仅抖音，支持 platform:guildId）'),
       }).description('抖音解析设置'),
       xiaohongshu: Schema.object({
         enabled: Schema.boolean().default(true).description('启用小红书解析'),
         userAgent: Schema.string().default(DEFAULT_USER_AGENT).description('抓取页面使用的 User-Agent'),
         maxRetries: Schema.number().default(3).min(1).max(6).description('抓取失败重试次数'),
         maxImages: Schema.number().default(20).min(1).max(40).description('图文最多保留图片数量'),
+        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（仅小红书，支持 platform:guildId）'),
       }).description('小红书解析设置'),
       bilibili: Schema.object({
         enabled: Schema.boolean().default(true).description('启用 Bilibili 解析'),
         fetchVideo: Schema.boolean().default(true).description('尝试获取视频直链（第三方 API，可能不稳定）'),
         maxDescLength: Schema.number().default(100).min(20).max(500).description('视频简介最大字符数'),
+        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（仅 Bilibili，支持 platform:guildId）'),
       }).description('Bilibili 解析设置'),
       twitter: Schema.object({
         enabled: Schema.boolean().default(false).description('启用 Twitter/X 解析（FxTwitter/Grok）'),
@@ -195,6 +202,7 @@ export const Config: Schema<Config> = Schema.intersect([
           maxChars: Schema.number().default(1200).min(80).max(10_000).description('翻译前截断最大字符数'),
           showOriginal: Schema.boolean().default(true).description('发送时保留原文（关闭后仅展示译文）'),
         }).description('Twitter/X 翻译设置'),
+        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（仅 Twitter/X，支持 platform:guildId）'),
       }).description('Twitter/X 解析设置'),
     }),
   }).description('平台设置'),
@@ -203,7 +211,7 @@ export const Config: Schema<Config> = Schema.intersect([
       enabled: Schema.boolean().default(true).description('启用自动解析中间件'),
       onlyGroup: Schema.boolean().default(true).description('仅在群聊触发自动解析'),
       blacklist: Schema.object({
-        guilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（支持 platform:guildId）'),
+        guilds: Schema.array(String).role('table').default([]).hidden().description('兼容旧配置：自动解析全局 guild 黑名单（建议改用各平台 autoParseBlockedGuilds）'),
         users: Schema.array(String).role('table').default([]).description('自动解析 user 黑名单（支持 platform:userId）'),
       }).description('自动解析黑名单'),
       maxUrlsPerMessage: Schema.number().default(3).min(1).max(10).description('单条消息最多解析链接数量'),
@@ -282,6 +290,10 @@ export function migrateConfig(rawConfig: unknown): MigrationResult {
   moveLegacy(source, migrated, usedLegacyKeys, 'onlyGroup', 'autoParse.onlyGroup')
   moveLegacy(source, migrated, usedLegacyKeys, 'autoParse.blockedGuilds', 'autoParse.blacklist.guilds')
   moveLegacy(source, migrated, usedLegacyKeys, 'autoParse.blockedUsers', 'autoParse.blacklist.users')
+  moveLegacy(source, migrated, usedLegacyKeys, 'douyin.autoParseBlockedGuilds', 'platforms.douyin.autoParseBlockedGuilds')
+  moveLegacy(source, migrated, usedLegacyKeys, 'xiaohongshu.autoParseBlockedGuilds', 'platforms.xiaohongshu.autoParseBlockedGuilds')
+  moveLegacy(source, migrated, usedLegacyKeys, 'bilibili.autoParseBlockedGuilds', 'platforms.bilibili.autoParseBlockedGuilds')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitter.autoParseBlockedGuilds', 'platforms.twitter.autoParseBlockedGuilds')
   moveLegacy(source, migrated, usedLegacyKeys, 'douyin.enabled', 'platforms.douyin.enabled')
   moveLegacy(source, migrated, usedLegacyKeys, 'douyin.apiBaseUrl', 'platforms.douyin.api.baseUrl')
   moveLegacy(source, migrated, usedLegacyKeys, 'douyin.fallbackApiBaseUrls', 'platforms.douyin.api.fallbackUrls')
@@ -308,6 +320,7 @@ export function migrateConfig(rawConfig: unknown): MigrationResult {
   moveLegacy(source, migrated, usedLegacyKeys, 'twitterTranslation.targetLanguage', 'platforms.twitter.translation.targetLanguage')
   moveLegacy(source, migrated, usedLegacyKeys, 'twitterTranslation.maxChars', 'platforms.twitter.translation.maxChars')
   moveLegacy(source, migrated, usedLegacyKeys, 'twitterTranslation.showOriginal', 'platforms.twitter.translation.showOriginal')
+  propagateLegacyGuildBlacklist(source, migrated)
 
   if (!hasPath(migrated, 'media.videoSendMode')) {
     const legacySendMode = getPath(migrated, 'media.sendMode')
@@ -336,8 +349,50 @@ function moveLegacy(
   usedLegacyKeys.push(legacyPath)
 }
 
+function propagateLegacyGuildBlacklist(source: Record<string, any>, target: Record<string, any>): void {
+  const legacyGuilds = normalizeStringArray(
+    hasPath(source, 'autoParse.blacklist.guilds')
+      ? getPath(source, 'autoParse.blacklist.guilds')
+      : hasPath(source, 'autoParse.blockedGuilds')
+        ? getPath(source, 'autoParse.blockedGuilds')
+        : [],
+  )
+
+  if (!legacyGuilds.length) {
+    return
+  }
+
+  const platformKeys = ['douyin', 'xiaohongshu', 'bilibili', 'twitter'] as const
+  for (const platformKey of platformKeys) {
+    const sourceHasScopedConfig = hasPath(source, `platforms.${platformKey}.autoParseBlockedGuilds`)
+      || hasPath(source, `${platformKey}.autoParseBlockedGuilds`)
+    if (sourceHasScopedConfig) {
+      continue
+    }
+
+    const current = normalizeStringArray(getPath(target, `platforms.${platformKey}.autoParseBlockedGuilds`))
+    if (current.length > 0) {
+      continue
+    }
+
+    setPath(target, `platforms.${platformKey}.autoParseBlockedGuilds`, [...legacyGuilds])
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  const normalized = value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean)
+
+  return Array.from(new Set(normalized))
 }
 
 function hasPath(source: Record<string, any>, path: string): boolean {

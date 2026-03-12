@@ -1,9 +1,10 @@
 import type { Context } from 'koishi'
 
 import type { Config } from './config'
+import type { SocialPlatform } from './types'
 import { parseSocialUrl } from './parse'
 import { sendParsedContent } from './utils/media'
-import { detectPlatformByUrl, extractSocialUrlsFromSession, isBlocked } from './utils/url'
+import { detectPlatformByUrl, extractSocialUrlsFromSession, isGuildBlocked, isUserBlocked } from './utils/url'
 
 const COOLDOWN_MIN_TTL_MS = 60_000
 const COOLDOWN_MAX_ENTRIES = 5_000
@@ -42,19 +43,28 @@ export function registerAutoParseMiddleware(
 
     cleanupCooldownMap(cooldownMap, Date.now(), config.network.cooldownMs)
 
-    if (isBlocked(session, config.autoParse.blacklist.guilds, config.autoParse.blacklist.users)) {
+    if (isUserBlocked(session, config.autoParse.blacklist.users)) {
       if (config.debug) {
-        logger.info(`auto parse blocked by blacklist: guild=${session.guildId || ''}, channel=${session.channelId || ''}, user=${session.userId || ''}`)
+        logger.info(`auto parse blocked by user blacklist: user=${session.userId || ''}`)
       }
       return next()
     }
 
     const limited = urls.slice(0, config.autoParse.maxUrlsPerMessage)
+    const legacyBlockedGuilds = config.autoParse.blacklist.guilds || []
 
     const resolvedSet = new Set<string>()
 
     for (const url of limited) {
       const platform = detectPlatformByUrl(url)
+      const blockedGuilds = getBlockedGuildsByPlatform(config, platform, legacyBlockedGuilds)
+      if (blockedGuilds.length > 0 && isGuildBlocked(session, blockedGuilds)) {
+        if (config.debug) {
+          logger.info(`auto parse blocked by guild blacklist: platform=${platform || 'unknown'}, guild=${session.guildId || ''}, channel=${session.channelId || ''}, url=${url}`)
+        }
+        continue
+      }
+
       if (platform && !isPlatformEnabled(config, platform)) {
         if (config.debug) {
           logger.info(`auto parse skipped: ${platform} disabled, url=${url}`)
@@ -151,6 +161,42 @@ function isPlatformEnabled(config: Config, platform: 'douyin' | 'xiaohongshu' | 
     return config.platforms.twitter.enabled
   }
   return config.platforms.twitter.enabled
+}
+
+function getBlockedGuildsByPlatform(
+  config: Config,
+  platform: SocialPlatform | null,
+  legacyBlockedGuilds: string[],
+): string[] {
+  const scoped = getPlatformBlockedGuilds(config, platform)
+  if (!legacyBlockedGuilds.length) {
+    return scoped
+  }
+  if (!scoped.length) {
+    return [...legacyBlockedGuilds]
+  }
+  return Array.from(new Set([...scoped, ...legacyBlockedGuilds]))
+}
+
+function getPlatformBlockedGuilds(config: Config, platform: SocialPlatform | null): string[] {
+  if (!platform) {
+    return []
+  }
+
+  if (platform === 'douyin') {
+    return config.platforms.douyin.autoParseBlockedGuilds || []
+  }
+  if (platform === 'xiaohongshu') {
+    return config.platforms.xiaohongshu.autoParseBlockedGuilds || []
+  }
+  if (platform === 'bilibili') {
+    return config.platforms.bilibili.autoParseBlockedGuilds || []
+  }
+  if (platform === 'twitter') {
+    return config.platforms.twitter.autoParseBlockedGuilds || []
+  }
+
+  return []
 }
 
 function isDisabledParseError(message: string): boolean {

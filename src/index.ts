@@ -55,7 +55,8 @@ export const usage = `
 
 ### 自动解析
 
-- 自动解析受 \`autoParse.blacklist.guilds\` / \`autoParse.blacklist.users\` 黑名单限制。
+- 自动解析支持平台级群聊黑名单：\`platforms.<platform>.autoParseBlockedGuilds\`。
+- 自动解析用户黑名单：\`autoParse.blacklist.users\`。
 - 自动解析命中后直接发送解析结果，不做 ChatLuna 上下文注入。
 
 ### 视频处理策略
