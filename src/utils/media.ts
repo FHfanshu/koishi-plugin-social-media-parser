@@ -22,6 +22,7 @@ export async function sendParsedContent(
   const platformName = getPlatformName(parsed.platform)
   const intro = buildIntroText(platformName, parsed, sourceUrl, config)
   const imageUrls = resolveImageUrlsForSend(parsed, config)
+  const forceTextOnlyForwardForImages = isOneBot && parsed.platform === 'xiaohongshu'
 
   const shouldAutoForward =
     isOneBot
@@ -50,13 +51,15 @@ export async function sendParsedContent(
         ? await buildImageSegments(ctx, imageUrls, config, logger, isOneBot)
         : []
       const shouldForwardVideo = isOneBot && config.forward.enabled
+      const forwardImageSegments = forceTextOnlyForwardForImages ? [] : imageSegments
 
       if (shouldForwardVideo) {
-        const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
-        if (forwardMode === 'full') {
-          await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
-        } else {
+        const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, forwardImageSegments, config, logger)
+        const shouldSendImagesPlain = forceTextOnlyForwardForImages || forwardMode !== 'full'
+        if (shouldSendImagesPlain) {
           await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
+        } else {
+          await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
         }
         await session.send(videoElement)
       } else {
@@ -72,13 +75,15 @@ export async function sendParsedContent(
   if (imageUrls.length > 0) {
     const imageSegments = await buildImageSegments(ctx, imageUrls, config, logger, isOneBot)
     const shouldForwardImages = isOneBot && config.forward.enabled
+    const forwardImageSegments = forceTextOnlyForwardForImages ? [] : imageSegments
 
     if (shouldForwardImages) {
-      const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
-      if (forwardMode === 'full') {
-        await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
-      } else {
+      const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, forwardImageSegments, config, logger)
+      const shouldSendImagesPlain = forceTextOnlyForwardForImages || forwardMode !== 'full'
+      if (shouldSendImagesPlain) {
         await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
+      } else {
+        await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
       }
       return
     }
