@@ -38,7 +38,7 @@ export async function parseBilibili(
   config: Config,
   logger: Logger
 ): Promise<ParsedContent> {
-  const finalUrl = await resolveRedirect(ctx, inputUrl, config.timeoutMs, logger)
+  const finalUrl = await resolveRedirect(ctx, inputUrl, config.network.timeoutMs, logger)
   const videoId = extractVideoId(finalUrl) || extractVideoId(inputUrl)
   if (!videoId) {
     throw new Error('无法从 Bilibili 链接中提取 BV/AV 号')
@@ -48,7 +48,7 @@ export async function parseBilibili(
   const canonicalUrl = detail.bvid ? `https://www.bilibili.com/video/${detail.bvid}` : finalUrl
 
   let videoUrl = ''
-  if (config.bilibili.fetchVideo) {
+  if (config.platforms.bilibili.fetchVideo) {
     videoUrl = await fetchVideoDirectUrl(ctx, detail, canonicalUrl, config, logger)
     if (!videoUrl) {
       logger.warn(`bilibili video direct link unavailable, fallback to metadata only: ${canonicalUrl}`)
@@ -59,7 +59,7 @@ export async function parseBilibili(
     platform: 'bilibili',
     title: detail.title,
     author: detail.owner || undefined,
-    content: buildContent(detail, config.bilibili.maxDescLength),
+    content: buildContent(detail, config.platforms.bilibili.maxDescLength),
     images: detail.cover ? [detail.cover] : [],
     videos: videoUrl ? [videoUrl] : [],
     videoDurationSec: detail.durationSec > 0 ? detail.durationSec : undefined,
@@ -73,7 +73,7 @@ async function fetchVideoDetail(ctx: Context, videoId: BilibiliVideoId, config: 
     ? `bvid=${encodeURIComponent(videoId.value)}`
     : `aid=${encodeURIComponent(videoId.value)}`
   const endpoint = `https://api.bilibili.com/x/web-interface/view?${query}`
-  const payload = await requestJson(ctx, endpoint, config.timeoutMs)
+  const payload = await requestJson(ctx, endpoint, config.network.timeoutMs)
 
   const code = toNumber(payload?.code)
   if (code !== 0 || !payload?.data) {
@@ -149,7 +149,7 @@ async function fetchVideoDirectUrlViaOfficialApi(
   const endpoint = `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(detail.bvid)}&cid=${encodeURIComponent(detail.cid)}&qn=80&fnval=0&fnver=0&fourk=1`
 
   try {
-    const payload = await requestJson(ctx, endpoint, config.timeoutMs)
+    const payload = await requestJson(ctx, endpoint, config.network.timeoutMs)
     const code = toNumber(payload?.code)
     if (code !== 0 || !payload?.data) {
       const reason = typeof payload?.message === 'string' ? payload.message : `code=${code}`
@@ -188,7 +188,7 @@ async function fetchVideoDirectUrlViaXingzhige(
   const endpoint = `https://api.xingzhige.com/API/b_parse/?url=${encodeURIComponent(bilibiliUrl)}`
 
   try {
-    const payload = await requestJson(ctx, endpoint, config.timeoutMs)
+    const payload = await requestJson(ctx, endpoint, config.network.timeoutMs)
     const code = toNumber(payload?.code)
     const videoUrl = asString(payload?.data?.video?.url).trim()
 
@@ -233,7 +233,7 @@ async function fetchVideoDirectUrlViaInjahow(
   const endpoint = `https://api.injahow.cn/bparse/?${query}&p=1&q=64&format=mp4&otype=json`
 
   try {
-    const payload = await requestJson(ctx, endpoint, config.timeoutMs)
+    const payload = await requestJson(ctx, endpoint, config.network.timeoutMs)
     const code = toNumber(payload?.code)
     const videoUrl = normalizeResourceUrl(asString(payload?.url).trim())
 

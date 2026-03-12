@@ -7,7 +7,7 @@ import type { ParsedContent } from '../types'
 import { processVideoForContext, probeVideoDuration } from './compress'
 import { downloadBuffer } from './http'
 import type { DownloadedBuffer } from './http'
-import { toMediaUrl } from './storage'
+import { toDataUri, toMediaUrl } from './storage'
 import { isSafePublicHttpUrl } from './url'
 
 export async function sendParsedContent(
@@ -18,17 +18,8 @@ export async function sendParsedContent(
   logger: Logger
 ): Promise<void> {
   const isOneBot = session.platform === 'onebot'
-  const isTwitter = parsed.platform === 'twitter'
   const sourceUrl = simplifyDisplayUrl(parsed.resolvedUrl || parsed.originalUrl)
-  const platformName = parsed.platform === 'douyin'
-    ? '抖音'
-    : parsed.platform === 'bilibili'
-      ? '哔哩哔哩'
-      : parsed.platform === 'twitter'
-        ? 'Twitter/X'
-      : parsed.platform === 'youtube'
-        ? 'YouTube'
-        : '小红书'
+  const platformName = getPlatformName(parsed.platform)
   const intro = buildIntroText(platformName, parsed, sourceUrl, config)
 
   const shouldAutoForward =
@@ -49,52 +40,27 @@ export async function sendParsedContent(
 
   if (parsed.videos.length > 0) {
     const primaryVideo = parsed.videos[0]
-    const videoElement = await buildVideoElement(ctx, primaryVideo, parsed, config, logger)
+    const videoElement = await buildVideoElement(ctx, primaryVideo, parsed, config, logger, isOneBot)
 
     if (!videoElement) {
       logger.info(`video unavailable or skipped, fallback to image/text: ${primaryVideo}`)
     } else {
-      const shouldForwardVideo = isTwitter
-        ? Boolean(config.twitterSendPolicy.forwardTextAndImages)
-        : (shouldAutoForward || shouldForwardByMediaCount)
+      const imageSegments = parsed.images.length > 0
+        ? await buildImageSegments(ctx, parsed.images, config, logger)
+        : []
+      const shouldForwardVideo = isOneBot && config.forward.enabled
+
       if (shouldForwardVideo) {
-        const nodes = createForwardTextNodes(intro, session, config)
-        const includeVideoInForward = isTwitter
-          ? !config.twitterSendPolicy.videoAsPlainMessage
-          : config.forward.experimentalForwardVideo
-        let imageSegments: any[] = []
-        if (includeVideoInForward && nodes.length < config.forward.maxForwardNodes) {
-          nodes.push(h('message', { nickname: config.forward.nickname, userId: session.selfId }, videoElement))
+        const forwarded = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
+        if (forwarded) {
+          await sendMediaPlain(session, [], parsed.musicUrl, config, logger)
+        } else {
+          await sendMediaPlain(session, imageSegments, parsed.musicUrl, config, logger)
         }
-
-        if (parsed.images.length > 0) {
-          imageSegments = await buildImageSegments(ctx, parsed.images, config, logger)
-          for (const image of imageSegments) {
-            if (nodes.length >= config.forward.maxForwardNodes) {
-              break
-            }
-            nodes.push(h('message', { nickname: config.forward.nickname, userId: session.selfId }, image))
-          }
-        }
-
-        if (config.forward.includeMusic && parsed.musicUrl && nodes.length < config.forward.maxForwardNodes) {
-          nodes.push(
-            h('message', { nickname: config.forward.nickname, userId: session.selfId }, [
-              '背景音乐：',
-              h('audio', { src: parsed.musicUrl }),
-            ])
-          )
-        }
-
-        const forwarded = await sendForwardNodes(ctx, session, nodes, config, logger)
-        if (!forwarded) {
-          await sendImagesPlain(session, intro, imageSegments, parsed.musicUrl, config)
-        }
-        if (config.twitterSendPolicy.videoAsPlainMessage || !includeVideoInForward || !forwarded) {
-          await session.send(videoElement)
-        }
+        await session.send(videoElement)
       } else {
-        await session.send(h.text(intro))
+        await sendIntroPlain(session, intro)
+        await sendMediaPlain(session, imageSegments, parsed.musicUrl, config, logger)
         await session.send(videoElement)
       }
 
@@ -104,62 +70,53 @@ export async function sendParsedContent(
 
   if (parsed.images.length > 0) {
     const imageSegments = await buildImageSegments(ctx, parsed.images, config, logger)
-    const shouldForwardImages = isTwitter
-      ? isOneBot && config.forward.enabled && config.twitterSendPolicy.forwardTextAndImages
-      : (
-        isOneBot
-        && config.forward.enabled
-        && (shouldAutoForward || shouldForwardByMediaCount || parsed.images.length >= config.forward.imageMergeThreshold)
-      )
+    const shouldForwardImages = isOneBot && config.forward.enabled
 
     if (shouldForwardImages) {
-      const nodes = createForwardTextNodes(intro, session, config)
-
-      for (const image of imageSegments) {
-        if (nodes.length >= config.forward.maxForwardNodes) {
-          break
-        }
-        nodes.push(h('message', { nickname: config.forward.nickname, userId: session.selfId }, image))
-      }
-
-      if (config.forward.includeMusic && parsed.musicUrl && nodes.length < config.forward.maxForwardNodes) {
-        nodes.push(
-          h('message', { nickname: config.forward.nickname, userId: session.selfId }, [
-            '背景音乐：',
-            h('audio', { src: parsed.musicUrl }),
-          ])
-        )
-      }
-
-      const forwarded = await sendForwardNodes(ctx, session, nodes, config, logger)
+      const forwarded = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
       if (forwarded) {
-        return
+        await sendMediaPlain(session, [], parsed.musicUrl, config, logger)
+      } else {
+        await sendMediaPlain(session, imageSegments, parsed.musicUrl, config, logger)
       }
+      return
     }
 
-    await sendImagesPlain(session, intro, imageSegments, parsed.musicUrl, config)
+    await sendIntroPlain(session, intro)
+    await sendMediaPlain(session, imageSegments, parsed.musicUrl, config, logger)
     return
   }
 
   const shouldForwardTextOnly =
-    isTwitter
-      ? isOneBot && config.forward.enabled && config.twitterSendPolicy.forwardTextAndImages
-      : (
-        isOneBot
-        && config.forward.enabled
-        && config.forward.autoMergeForward
-        && (intro.length >= config.forward.longTextThreshold || shouldForwardByMediaCount)
-      )
+    isOneBot
+    && config.forward.enabled
+    && config.forward.autoMergeForward
+    && (intro.length >= config.forward.longTextThreshold || shouldForwardByMediaCount)
 
   if (shouldForwardTextOnly) {
     const nodes = createForwardTextNodes(intro, session, config)
     const forwarded = await sendForwardNodes(ctx, session, nodes, config, logger)
     if (forwarded) {
+      await sendMediaPlain(session, [], parsed.musicUrl, config, logger)
       return
     }
   }
 
-  await session.send(h.text(intro))
+  await sendIntroPlain(session, intro)
+  await sendMediaPlain(session, [], parsed.musicUrl, config, logger)
+}
+
+function getPlatformName(platform: ParsedContent['platform']): string {
+  switch (platform) {
+    case 'douyin':
+      return '抖音'
+    case 'bilibili':
+      return '哔哩哔哩'
+    case 'twitter':
+      return 'Twitter/X'
+    default:
+      return '小红书'
+  }
 }
 
 async function buildVideoElement(
@@ -167,7 +124,8 @@ async function buildVideoElement(
   url: string,
   parsed: ParsedContent,
   config: Config,
-  logger: Logger
+  logger: Logger,
+  isOneBot: boolean
 ): Promise<any> {
   if (!isSafePublicHttpUrl(url)) {
     logger.warn(`video send skipped by url safety policy: ${url}`)
@@ -175,16 +133,17 @@ async function buildVideoElement(
   }
 
   const hasStorage = hasStorageService(ctx)
+  const videoSendMode = config.media.videoSendMode
   const knownDurationSec = Number.isFinite(parsed.videoDurationSec)
     ? Number(parsed.videoDurationSec)
     : null
   const allowUnknownDuration =
-    (parsed.platform === 'bilibili' || parsed.platform === 'douyin')
-    && config.fallbackToUrlOnError
+    (parsed.platform === 'bilibili' || parsed.platform === 'douyin' || parsed.platform === 'xiaohongshu')
+    && config.media.fallbackToUrlOnError
   let downloaded: DownloadedBuffer | null = null
   try {
-    if (config.sendMode === 'url' && !hasStorage) {
-      if (config.maxVideoDurationSec && config.maxVideoDurationSec > 0) {
+    if (videoSendMode === 'url') {
+      if (config.media.maxDurationSec && config.media.maxDurationSec > 0) {
         downloaded = await downloadVideoForSend(ctx, url, config)
         if (!await isDurationAllowed(downloaded, url, config, logger, knownDurationSec, allowUnknownDuration)) {
           return null
@@ -199,52 +158,24 @@ async function buildVideoElement(
       return null
     }
 
-    if (hasStorage) {
-      if (config.sendMode === 'url') {
-        const storedUrl = await toMediaUrl(ctx, downloaded.mimeType || 'video/mp4', downloaded.buffer, 'send_video', logger)
-        return buildVideoSegmentFromMediaUrl(storedUrl, downloaded.buffer)
-      }
-
-      const optimized = await optimizeVideoBeforeSend(downloaded.buffer, downloaded.mimeType || 'video/mp4', config, logger)
-      const finalBuffer = optimized?.buffer || downloaded.buffer
-      const finalMime = optimized?.mimeType || downloaded.mimeType || 'video/mp4'
-
-      const storedUrl = await toMediaUrl(ctx, finalMime, finalBuffer, 'send_video', logger)
-      return buildVideoSegmentFromMediaUrl(storedUrl, finalBuffer)
-    }
-
-    const optimized = await optimizeVideoBeforeSend(downloaded.buffer, downloaded.mimeType || 'video/mp4', config, logger)
-    const finalBuffer = optimized?.buffer || downloaded.buffer
-    const finalMime = optimized?.mimeType || downloaded.mimeType || 'video/mp4'
-
-    if (finalBuffer.length > config.maxMediaBytes) {
-      throw new Error(`video payload too large for send: ${finalBuffer.length} > ${config.maxMediaBytes}`)
-    }
-
-    try {
-      return h.video(finalBuffer, finalMime)
-    } catch {
-      const storedUrl = await toMediaUrl(ctx, finalMime, finalBuffer, 'send_video', logger)
-      if (storedUrl.startsWith('http')) {
-        return segment.video(storedUrl)
-      }
-      const base64 = finalBuffer.toString('base64')
-      return segment.video(`base64://${base64}`)
-    }
+    return buildConfiguredVideoElement(ctx, downloaded, config, logger, videoSendMode, hasStorage, isOneBot)
   } catch (error) {
     logger.debug(`video build failed: ${String((error as Error)?.message || error)}`)
-    if (!config.fallbackToUrlOnError) {
+    if (!config.media.fallbackToUrlOnError) {
       throw error
     }
 
-    if (config.maxVideoDurationSec && config.maxVideoDurationSec > 0) {
+    if (config.media.maxDurationSec && config.media.maxDurationSec > 0) {
       const payload = downloaded || await downloadVideoForSend(ctx, url, config).catch(() => null)
       if (!payload) {
         logger.warn(`video fallback: unable to verify duration (download failed), proceeding with url fallback, url=${url}`)
-        // Do NOT return null here — fall through to segment.video(url)
       } else if (!await isDurationAllowed(payload, url, config, logger, knownDurationSec, allowUnknownDuration)) {
         return null
       }
+    }
+
+    if (downloaded && videoSendMode !== 'url') {
+      return buildConfiguredVideoElement(ctx, downloaded, config, logger, videoSendMode, hasStorage, isOneBot)
     }
 
     if (!isSafePublicHttpUrl(url)) {
@@ -252,7 +183,46 @@ async function buildVideoElement(
       return null
     }
 
+    if (videoSendMode !== 'url' && isOneBot) {
+      logger.warn(`video fallback skipped: onebot requires downloaded video for ${videoSendMode} mode, url=${url}`)
+      return null
+    }
+
     return segment.video(url)
+  }
+}
+
+async function buildConfiguredVideoElement(
+  ctx: Context,
+  downloaded: DownloadedBuffer,
+  config: Config,
+  logger: Logger,
+  videoSendMode: Config['media']['videoSendMode'],
+  hasStorage: boolean,
+  isOneBot: boolean
+): Promise<any> {
+  const optimized = await optimizeVideoBeforeSend(downloaded.buffer, downloaded.mimeType || 'video/mp4', config, logger)
+  const finalBuffer = optimized?.buffer || downloaded.buffer
+  const finalMime = optimized?.mimeType || downloaded.mimeType || 'video/mp4'
+
+  if (videoSendMode === 'storage') {
+    const storedUrl = await toMediaUrl(ctx, finalMime, finalBuffer, 'send_video', logger)
+    return buildVideoSegmentFromMediaUrl(storedUrl, finalBuffer)
+  }
+
+  if (finalBuffer.length > config.media.maxBytes) {
+    logger.warn(`video send skipped: payload too large ${finalBuffer.length} > ${config.media.maxBytes}`)
+    return null
+  }
+
+  if (videoSendMode === 'base64' || isOneBot || !hasStorage) {
+    return segment.video(toDataUri(finalMime, finalBuffer))
+  }
+
+  try {
+    return h.video(finalBuffer, finalMime)
+  } catch {
+    return segment.video(toDataUri(finalMime, finalBuffer))
   }
 }
 
@@ -261,12 +231,15 @@ function buildVideoSegmentFromMediaUrl(mediaUrl: string, buffer: Buffer): any {
     return segment.video(mediaUrl)
   }
 
-  if (mediaUrl.startsWith('base64://')) {
+  if (mediaUrl.startsWith('data:')) {
     return segment.video(mediaUrl)
   }
 
-  const base64 = buffer.toString('base64')
-  return segment.video(`base64://${base64}`)
+  if (mediaUrl.startsWith('base64://')) {
+    return segment.video(toDataUri('video/mp4', buffer))
+  }
+
+  return segment.video(toDataUri('video/mp4', buffer))
 }
 
 function hasStorageService(ctx: Context): boolean {
@@ -275,10 +248,10 @@ function hasStorageService(ctx: Context): boolean {
 }
 
 async function downloadVideoForSend(ctx: Context, url: string, config: Config): Promise<DownloadedBuffer> {
-  const maxVideoBytes = Math.max(config.maxMediaBytes, config.maxVideoDownloadBytes || config.maxMediaBytes)
+  const maxVideoBytes = Math.max(config.media.maxBytes, config.media.maxVideoBytes || config.media.maxBytes)
   const referer = inferMediaReferer(url)
   try {
-    return await downloadBuffer(ctx, url, config.timeoutMs, {
+    return await downloadBuffer(ctx, url, config.network.timeoutMs, {
       headers: referer
         ? {
             referer,
@@ -290,7 +263,7 @@ async function downloadVideoForSend(ctx: Context, url: string, config: Config): 
       maxBytes: maxVideoBytes,
     })
   } catch {
-    return downloadBuffer(ctx, url, config.timeoutMs, {
+    return downloadBuffer(ctx, url, config.network.timeoutMs, {
       headers: {
         accept: '*/*',
       },
@@ -307,7 +280,7 @@ async function isDurationAllowed(
   knownDurationSec: number | null,
   allowUnknownDuration: boolean
 ): Promise<boolean> {
-  if (!config.maxVideoDurationSec || config.maxVideoDurationSec <= 0) {
+  if (!config.media.maxDurationSec || config.media.maxDurationSec <= 0) {
     return true
   }
 
@@ -329,8 +302,8 @@ async function isDurationAllowed(
     return false
   }
 
-  if (durationSec > config.maxVideoDurationSec) {
-    const limitMin = Math.round(config.maxVideoDurationSec / 60)
+  if (durationSec > config.media.maxDurationSec) {
+    const limitMin = Math.round(config.media.maxDurationSec / 60)
     const actualMin = Math.round(durationSec / 60)
     logger.info(`video send skipped: duration ${actualMin}min exceeds limit ${limitMin}min, url=${url}`)
     return false
@@ -350,7 +323,7 @@ async function optimizeVideoBeforeSend(
     return null
   }
 
-  const minCompressBytes = Math.min(config.maxMediaBytes, 4 * 1024 * 1024)
+  const minCompressBytes = Math.min(config.media.maxBytes, 4 * 1024 * 1024)
   if (buffer.length < minCompressBytes) {
     return null
   }
@@ -385,7 +358,7 @@ async function buildImageSegments(
 ): Promise<any[]> {
   const imageSegments = [] as any[]
   for (const url of urls) {
-    if (config.sendMode === 'url') {
+    if (config.media.sendMode === 'url') {
       if (!isSafePublicHttpUrl(url)) {
         logger.warn(`image send skipped by url safety policy: ${url}`)
         continue
@@ -396,15 +369,10 @@ async function buildImageSegments(
     }
 
     try {
-      const downloaded = await downloadBuffer(ctx, url, config.timeoutMs, {
-        maxBytes: config.maxMediaBytes,
-      })
-
-      const storedUrl = await toMediaUrl(ctx, downloaded.mimeType, downloaded.buffer, 'send_img', logger)
-      imageSegments.push(segment.image(storedUrl))
+      imageSegments.push(await buildImageSegment(ctx, url, config, logger))
     } catch (error) {
       logger.debug(`image base64 send failed: ${String((error as Error)?.message || error)}`)
-      if (!config.fallbackToUrlOnError) {
+      if (!config.media.fallbackToUrlOnError) {
         throw error
       }
 
@@ -413,11 +381,91 @@ async function buildImageSegments(
         continue
       }
 
+      if (isTwitterMediaUrl(url)) {
+        logger.warn(`image fallback skipped: remote Twitter/X image URL is unstable on OneBot, url=${url}`)
+        continue
+      }
+
       imageSegments.push(segment.image(url))
     }
   }
 
   return imageSegments
+}
+
+async function buildImageSegment(
+  ctx: Context,
+  url: string,
+  config: Config,
+  logger: Logger
+): Promise<any> {
+  const downloaded = await downloadImageForSend(ctx, url, config)
+  if (config.media.sendMode === 'base64') {
+    return segment.image(toDataUri(downloaded.mimeType || 'image/jpeg', downloaded.buffer))
+  }
+
+  const storedUrl = await toMediaUrl(ctx, downloaded.mimeType, downloaded.buffer, 'send_img', logger)
+  return segment.image(storedUrl)
+}
+
+async function downloadImageForSend(
+  ctx: Context,
+  url: string,
+  config: Config
+): Promise<DownloadedBuffer> {
+  const candidates = buildImageDownloadCandidates(url)
+  let lastError: unknown = null
+
+  for (const candidate of candidates) {
+    const referer = inferMediaReferer(candidate)
+    try {
+      return await downloadBuffer(ctx, candidate, config.network.timeoutMs, {
+        headers: referer
+          ? {
+              referer,
+              accept: '*/*',
+            }
+          : {
+              accept: '*/*',
+            },
+        maxBytes: config.media.maxBytes,
+      })
+    } catch (error) {
+      lastError = error
+    }
+  }
+
+  throw lastError || new Error(`image download failed: ${url}`)
+}
+
+function buildImageDownloadCandidates(url: string): string[] {
+  const candidates = [url]
+  if (!isTwitterMediaUrl(url)) {
+    return candidates
+  }
+
+  for (const quality of ['large', 'medium', 'small']) {
+    const variant = rewriteTwitterImageQuality(url, quality)
+    if (variant && !candidates.includes(variant)) {
+      candidates.push(variant)
+    }
+  }
+
+  return candidates
+}
+
+function rewriteTwitterImageQuality(url: string, quality: string): string {
+  try {
+    const parsed = new URL(url)
+    if (!/pbs\.twimg\.com$/i.test(parsed.hostname)) {
+      return url
+    }
+
+    parsed.searchParams.set('name', quality)
+    return parsed.toString()
+  } catch {
+    return url
+  }
 }
 
 async function sendForwardNodes(
@@ -432,13 +480,18 @@ async function sendForwardNodes(
   }
 
   const safeNodes = nodes.slice(0, config.forward.maxForwardNodes)
+  const primaryNodes = session.platform === 'onebot'
+    ? await rewriteForwardNodesForRetry(ctx, safeNodes, config, logger)
+    : safeNodes
 
-  if (await trySendForward(session, safeNodes, logger, 'primary')) {
+  if (await trySendForward(session, primaryNodes, logger, 'primary')) {
     return true
   }
 
   await sleep(600)
-  const retryNodes = await rewriteForwardNodesForRetry(ctx, safeNodes, config, logger)
+  const retryNodes = primaryNodes === safeNodes
+    ? await rewriteForwardNodesForRetry(ctx, safeNodes, config, logger)
+    : primaryNodes
   return trySendForward(session, retryNodes, logger, 'retry')
 }
 
@@ -480,15 +533,18 @@ async function rewriteForwardNodeElement(
     ? { ...element.attrs }
     : element.attrs
 
-  if (
+  const remoteImageUrl = (
     attrs &&
     (element.type === 'img' || element.type === 'image') &&
-    typeof attrs.src === 'string' &&
-    attrs.src.startsWith('http')
-  ) {
-    const inlined = await inlineForwardImage(ctx, attrs.src, config, logger)
+    resolveForwardImageUrl(attrs)
+  )
+
+  if (remoteImageUrl) {
+    const inlined = await inlineForwardImage(ctx, remoteImageUrl, config, logger)
     if (inlined) {
-      attrs.src = inlined
+      if (typeof attrs.src === 'string') attrs.src = inlined
+      if (typeof attrs.url === 'string') attrs.url = inlined
+      if (typeof attrs.file === 'string') attrs.file = inlined
     }
   }
 
@@ -503,6 +559,17 @@ async function rewriteForwardNodeElement(
   }
 }
 
+function resolveForwardImageUrl(attrs: Record<string, any>): string {
+  for (const key of ['src', 'url', 'file']) {
+    const value = attrs[key]
+    if (typeof value === 'string' && value.startsWith('http')) {
+      return value
+    }
+  }
+
+  return ''
+}
+
 async function inlineForwardImage(
   ctx: Context,
   url: string,
@@ -511,7 +578,7 @@ async function inlineForwardImage(
 ): Promise<string | null> {
   const referer = inferMediaReferer(url)
   try {
-    const downloaded = await downloadBuffer(ctx, url, config.timeoutMs, {
+    const downloaded = await downloadBuffer(ctx, url, config.network.timeoutMs, {
       headers: referer
         ? {
             referer,
@@ -520,7 +587,7 @@ async function inlineForwardImage(
         : {
             accept: '*/*',
           },
-      maxBytes: config.maxMediaBytes,
+      maxBytes: config.media.maxBytes,
     })
     return `data:${downloaded.mimeType || 'image/jpeg'};base64,${downloaded.buffer.toString('base64')}`
   } catch (error) {
@@ -538,11 +605,73 @@ async function sendImagesPlain(
   intro: string,
   imageSegments: any[],
   musicUrl: string | undefined,
-  config: Config
+  config: Config,
+  logger: Logger
 ): Promise<void> {
+  await sendIntroPlain(session, intro)
+  await sendMediaPlain(session, imageSegments, musicUrl, config, logger)
+}
+
+async function sendForwardIntroOrPlain(
+  ctx: Context,
+  session: Session,
+  intro: string,
+  config: Config,
+  logger: Logger
+): Promise<void> {
+  const nodes = createForwardTextNodes(intro, session, config)
+  if (nodes.length && await sendForwardNodes(ctx, session, nodes, config, logger)) {
+    return
+  }
+
+  await sendIntroPlain(session, intro)
+}
+
+async function sendForwardContentOrPlain(
+  ctx: Context,
+  session: Session,
+  intro: string,
+  imageSegments: any[],
+  config: Config,
+  logger: Logger
+): Promise<boolean> {
+  const nodes = createForwardContentNodes(intro, imageSegments, session, config)
+  if (nodes.length && await sendForwardNodes(ctx, session, nodes, config, logger)) {
+    return true
+  }
+
+  await sendIntroPlain(session, intro)
+  return false
+}
+
+async function sendIntroPlain(session: Session, intro: string): Promise<void> {
+  if (!intro.trim()) {
+    return
+  }
+
   await session.send(h.text(intro))
+}
+
+async function sendMediaPlain(
+  session: Session,
+  imageSegments: any[],
+  musicUrl: string | undefined,
+  config: Config,
+  logger: Logger
+): Promise<void> {
   if (imageSegments.length) {
-    await session.send(imageSegments)
+    try {
+      await session.send(imageSegments)
+    } catch (error) {
+      logger.warn(`image batch send failed, retry individually: ${String((error as Error)?.message || error)}`)
+      for (const imageSegment of imageSegments) {
+        try {
+          await session.send(imageSegment)
+        } catch (singleError) {
+          logger.warn(`image send skipped after retry: ${String((singleError as Error)?.message || singleError)}`)
+        }
+      }
+    }
   }
 
   if (config.forward.includeMusic && musicUrl) {
@@ -555,7 +684,7 @@ function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: 
   const translatedText = parsed.translatedContent?.trim() ? truncateText(parsed.translatedContent.trim(), 350) : ''
 
   if (parsed.platform === 'twitter' && translatedText) {
-    const textPart = config.twitterTranslation.showOriginal
+    const textPart = config.platforms.twitter.translation.showOriginal
       ? [
           originalText ? `原文：\n${originalText}` : '',
           `翻译：\n${translatedText}`,
@@ -605,8 +734,8 @@ function inferMediaReferer(url: string): string {
     if (host.includes('bilibili.com') || host.includes('bilivideo.')) {
       return 'https://www.bilibili.com/'
     }
-    if (host.includes('youtube.com') || host.includes('youtu.be') || host.includes('googlevideo.com')) {
-      return 'https://www.youtube.com/'
+    if (host.includes('x.com') || host.includes('twitter.com') || host.includes('twimg.com')) {
+      return 'https://x.com/'
     }
   } catch {
     // ignore
@@ -615,10 +744,33 @@ function inferMediaReferer(url: string): string {
   return ''
 }
 
+function isTwitterMediaUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return host === 'pbs.twimg.com' || host.endsWith('.twimg.com') || host === 'video.twimg.com'
+  } catch {
+    return false
+  }
+}
+
 function createForwardTextNodes(text: string, session: Session, config: Config): any[] {
   const chunks = splitTextChunks(text, config.forward.textChunkSize)
   const limited = chunks.slice(0, Math.max(1, config.forward.maxForwardNodes))
   return limited.map((chunk) => h('message', { nickname: config.forward.nickname, userId: session.selfId }, chunk))
+}
+
+function createForwardContentNodes(text: string, imageSegments: any[], session: Session, config: Config): any[] {
+  const nodes = createForwardTextNodes(text, session, config)
+  const remaining = Math.max(0, config.forward.maxForwardNodes - nodes.length)
+  if (!remaining || !imageSegments.length) {
+    return nodes
+  }
+
+  const imageNodes = imageSegments
+    .slice(0, remaining)
+    .map((image) => h('message', { nickname: config.forward.nickname, userId: session.selfId }, image))
+
+  return [...nodes, ...imageNodes]
 }
 
 function splitTextChunks(text: string, chunkSize: number): string[] {

@@ -159,7 +159,7 @@ async function buildMediaInjectionMessage(
         ? Number(parsed.videoDurationSec)
         : null
 
-      const allowUnknownDuration = parsed.platform === 'bilibili' || parsed.platform === 'douyin'
+      const allowUnknownDuration = parsed.platform === 'bilibili' || parsed.platform === 'douyin' || parsed.platform === 'xiaohongshu'
 
       // Duration guard: skip video injection if over the global limit
       if (maxVideoDurationSec && maxVideoDurationSec > 0) {
@@ -244,7 +244,7 @@ async function buildMediaInjectionMessage(
             }
           }
         } else {
-          if ((parsed.platform === 'bilibili' || parsed.platform === 'douyin') && isSafePublicHttpUrl(videoUrl)) {
+          if ((parsed.platform === 'bilibili' || parsed.platform === 'douyin' || parsed.platform === 'xiaohongshu') && isSafePublicHttpUrl(videoUrl)) {
             injectedVideo = true
             parts.push({
               type: 'video_url',
@@ -262,7 +262,7 @@ async function buildMediaInjectionMessage(
       }
     } catch (error) {
       logger.debug(`inject video failed: ${String((error as Error)?.message || error)}`)
-      if ((parsed.platform === 'bilibili' || parsed.platform === 'douyin') && isSafePublicHttpUrl(videoUrl)) {
+      if ((parsed.platform === 'bilibili' || parsed.platform === 'douyin' || parsed.platform === 'xiaohongshu') && isSafePublicHttpUrl(videoUrl)) {
         injectedVideo = true
         parts.push({
           type: 'video_url',

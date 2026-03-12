@@ -18,16 +18,18 @@ export async function parseXiaohongshu(
     throw new Error('小红书链接无效或域名不受支持')
   }
 
-  const finalUrl = await resolveRedirect(ctx, normalized, config.timeoutMs, logger)
-  const html = await fetchHtml(ctx, finalUrl, config, logger)
+  const finalUrl = await resolveRedirect(ctx, normalized, config.network.timeoutMs, logger)
+  const canonicalUrl = normalizeResolvedXiaohongshuUrl(finalUrl)
+  const html = await fetchHtml(ctx, finalUrl, canonicalUrl, config, logger)
   const parsed = parseNoteFromHtml(html, finalUrl, config, logger)
 
   return {
     platform: 'xiaohongshu',
     title: parsed.title || '未命名笔记',
     content: parsed.content || '',
-    images: parsed.images.slice(0, config.xiaohongshu.maxImages),
+    images: parsed.images.slice(0, config.platforms.xiaohongshu.maxImages),
     videos: parsed.videos,
+    videoDurationSec: parsed.videoDurationSec,
     originalUrl: inputUrl,
     resolvedUrl: finalUrl,
   }
@@ -38,12 +40,19 @@ interface ParsedXhsNote {
   content: string
   images: string[]
   videos: string[]
+  videoDurationSec?: number
   coverImage?: string
 }
 
-async function fetchHtml(ctx: Context, url: string, config: Config, logger: Logger): Promise<string> {
+async function fetchHtml(
+  ctx: Context,
+  primaryUrl: string,
+  fallbackUrl: string,
+  config: Config,
+  logger: Logger
+): Promise<string> {
   const headers = {
-    'User-Agent': config.xiaohongshu.userAgent,
+    'User-Agent': config.platforms.xiaohongshu.userAgent,
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     'Cache-Control': 'no-cache',
@@ -56,24 +65,52 @@ async function fetchHtml(ctx: Context, url: string, config: Config, logger: Logg
   }
 
   let lastError: unknown
+  const candidates = Array.from(new Set([primaryUrl, fallbackUrl].filter(Boolean)))
 
-  for (let attempt = 1; attempt <= config.xiaohongshu.maxRetries; attempt += 1) {
-    try {
-      const html = await requestText(ctx, url, config.timeoutMs, headers)
-      if (!html || typeof html !== 'string') {
-        throw new Error('empty html response')
-      }
-      return html
-    } catch (error) {
-      lastError = error
-      logger.debug(`xhs fetch failed (${attempt}/${config.xiaohongshu.maxRetries}): ${String((error as Error)?.message || error)}`)
-      if (attempt < config.xiaohongshu.maxRetries) {
-        await sleep(attempt * 400)
+  for (const url of candidates) {
+    for (let attempt = 1; attempt <= config.platforms.xiaohongshu.maxRetries; attempt += 1) {
+      try {
+        const html = await requestText(ctx, url, config.network.timeoutMs, headers)
+        if (!html || typeof html !== 'string') {
+          throw new Error('empty html response')
+        }
+        return html
+      } catch (error) {
+        lastError = error
+        logger.debug(`xhs fetch failed (${attempt}/${config.platforms.xiaohongshu.maxRetries}): url=${url}, ${String((error as Error)?.message || error)}`)
+        if (attempt < config.platforms.xiaohongshu.maxRetries) {
+          await sleep(attempt * 400)
+        }
       }
     }
   }
 
   throw lastError instanceof Error ? lastError : new Error('抓取小红书页面失败')
+}
+
+function normalizeResolvedXiaohongshuUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    const path = parsed.pathname || ''
+    const noteId = extractNoteIdFromUrl(url)
+    if (!noteId) {
+      parsed.hash = ''
+      return parsed.toString()
+    }
+
+    if (/\/discovery\/item\//i.test(path)) {
+      return `https://www.xiaohongshu.com/discovery/item/${noteId}`
+    }
+
+    if (/\/(explore|item|note|notes|post|detail)\//i.test(path)) {
+      return `https://www.xiaohongshu.com/explore/${noteId}`
+    }
+
+    parsed.hash = ''
+    return parsed.toString()
+  } catch {
+    return url
+  }
 }
 
 function parseNoteFromHtml(html: string, url: string, config: Config, logger: Logger): ParsedXhsNote {
@@ -83,6 +120,7 @@ function parseNoteFromHtml(html: string, url: string, config: Config, logger: Lo
     content: '',
     images: [],
     videos: [],
+    videoDurationSec: undefined,
   }
 
   const metaTitle = pickFirstString(
@@ -104,11 +142,13 @@ function parseNoteFromHtml(html: string, url: string, config: Config, logger: Lo
     const content = pickFirstString(jsonLd.articleBody, jsonLd.description)
     const images = normalizeImageField(jsonLd.image)
     const videos = normalizeVideoField(jsonLd.video ?? jsonLd.videoUrl ?? jsonLd.videoObject)
+    const durationSec = extractDurationSecFromVideoValue(jsonLd.video ?? jsonLd.videoObject)
 
     if (title) note.title = title
     if (content) note.content = content
     if (images.length) note.images.push(...images)
     if (videos.length) note.videos.push(...videos)
+    if (durationSec && durationSec > 0) note.videoDurationSec = durationSec
   }
 
   const initialState = extractInitialState($)
@@ -431,6 +471,13 @@ function mergeNoteDetail(note: ParsedXhsNote, detail: Record<string, any>, logge
     if (videos.length) {
       note.videos.push(...videos)
     }
+
+    if (!note.videoDurationSec || note.videoDurationSec <= 0) {
+      const durationSec = extractDurationSecFromDetail(record)
+      if (durationSec && durationSec > 0) {
+        note.videoDurationSec = durationSec
+      }
+    }
   }
 
   logger.debug(`xhs detail merged: images=${note.images.length}, videos=${note.videos.length}`)
@@ -651,6 +698,123 @@ function extractVideosFromDetail(record: Record<string, any>): string[] {
   }
 
   return results
+}
+
+function extractDurationSecFromDetail(record: Record<string, any>): number | undefined {
+  const directCandidates = [
+    record.duration,
+    record.durationSec,
+    record.durationSeconds,
+    record.videoDuration,
+    record.videoDurationSec,
+    record.playTime,
+    record.playTimeSec,
+    record.play_time,
+    record.length,
+    record.note?.duration,
+    record.note?.durationSec,
+    record.note?.videoDuration,
+    record.noteCard?.duration,
+    record.noteCard?.durationSec,
+    record.noteCard?.videoDuration,
+  ]
+
+  for (const candidate of directCandidates) {
+    const seconds = normalizeDurationSeconds(candidate)
+    if (seconds) {
+      return seconds
+    }
+  }
+
+  for (const nested of [
+    record.video,
+    record.videoInfo,
+    record.note?.video,
+    record.note?.videoInfo,
+    record.noteCard?.video,
+    record.noteCard?.videoInfo,
+  ]) {
+    const seconds = extractDurationSecFromVideoValue(nested)
+    if (seconds) {
+      return seconds
+    }
+  }
+
+  return undefined
+}
+
+function extractDurationSecFromVideoValue(value: unknown): number | undefined {
+  if (!value) {
+    return undefined
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const seconds = extractDurationSecFromVideoValue(item)
+      if (seconds) {
+        return seconds
+      }
+    }
+    return undefined
+  }
+
+  if (typeof value !== 'object') {
+    return normalizeDurationSeconds(value)
+  }
+
+  const record = value as Record<string, unknown>
+  for (const candidate of [
+    record.duration,
+    record.durationSec,
+    record.durationSeconds,
+    record.durationMs,
+    record.duration_ms,
+    record.videoDuration,
+    record.video_duration,
+    record.playTime,
+    record.play_time,
+    record.length,
+  ]) {
+    const seconds = normalizeDurationSeconds(candidate)
+    if (seconds) {
+      return seconds
+    }
+  }
+
+  for (const nested of [
+    record.media,
+    record.stream,
+    record.masterStream,
+    record.originVideo,
+    record.h264,
+    record.h265,
+  ]) {
+    const seconds = extractDurationSecFromVideoValue(nested)
+    if (seconds) {
+      return seconds
+    }
+  }
+
+  return undefined
+}
+
+function normalizeDurationSeconds(value: unknown): number | undefined {
+  if (value == null) {
+    return undefined
+  }
+
+  const text = typeof value === 'string' ? value.trim() : value
+  const raw = typeof text === 'number' ? text : Number(text)
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return undefined
+  }
+
+  const seconds = raw > 10_000 ? raw / 1000 : raw
+  if (seconds <= 0 || seconds > 12 * 60 * 60) {
+    return undefined
+  }
+
+  return seconds
 }
 
 function extractImageId(data: Record<string, unknown>): string | null {

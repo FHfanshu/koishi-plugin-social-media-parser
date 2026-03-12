@@ -20,7 +20,15 @@ const NAV_GROUPS: NavGroup[] = [
   {
     title: '基础',
     sections: [
-      { key: 'basic', title: '基础设置' },
+      { key: 'network-media', title: '网络与媒体设置' },
+      { key: 'network', title: '网络设置' },
+      { key: 'media', title: '媒体与发送设置' },
+    ],
+  },
+  {
+    title: '平台',
+    sections: [
+      { key: 'platforms', title: '平台设置' },
       { key: 'douyin', title: '抖音解析设置' },
       { key: 'xhs', title: '小红书解析设置' },
       { key: 'bili', title: 'Bilibili 解析设置' },
@@ -28,16 +36,15 @@ const NAV_GROUPS: NavGroup[] = [
       { key: 'twitter-grok', title: 'Twitter/X Grok 设置' },
       { key: 'twitter-routing', title: 'Twitter/X 路由优先级设置' },
       { key: 'twitter-translation', title: 'Twitter/X 翻译设置' },
-      { key: 'twitter-send-policy', title: 'Twitter/X 发送策略设置' },
-      { key: 'youtube', title: 'YouTube 解析设置' },
-      { key: 'forward', title: '转发消息设置' },
     ],
   },
   {
-    title: '自动与工具',
+    title: '自动与转发',
     sections: [
-      { key: 'auto-parse', title: '自动解析与上下文注入' },
-      { key: 'tool', title: 'ChatLuna 工具设置' },
+      { key: 'auto-forward', title: '自动解析与转发设置' },
+      { key: 'auto-parse', title: '自动解析设置' },
+      { key: 'forward', title: '转发消息设置' },
+      { key: 'debug', title: '调试设置' },
     ],
   },
 ]
@@ -45,7 +52,10 @@ const NAV_GROUPS: NavGroup[] = [
 const NAV_SECTIONS: NavSection[] = NAV_GROUPS.flatMap((group) => group.sections)
 
 const SECTION_TITLE_ALIASES: Record<string, string[]> = {
-  basic: ['基础设置'],
+  'network-media': ['网络与媒体设置'],
+  network: ['网络设置'],
+  media: ['媒体与发送设置'],
+  platforms: ['平台设置', '平台解析设置'],
   douyin: ['抖音解析设置'],
   xhs: ['小红书解析设置'],
   bili: ['Bilibili 解析设置', '哔哩哔哩'],
@@ -53,11 +63,10 @@ const SECTION_TITLE_ALIASES: Record<string, string[]> = {
   'twitter-grok': ['Twitter/X Grok 设置', 'Grok 设置'],
   'twitter-routing': ['Twitter/X 路由优先级设置', '路由优先级设置'],
   'twitter-translation': ['Twitter/X 翻译设置', '翻译设置'],
-  'twitter-send-policy': ['Twitter/X 发送策略设置', '发送策略设置'],
-  youtube: ['YouTube 解析设置', 'YouTube'],
+  'auto-forward': ['自动解析与转发设置'],
   forward: ['转发消息设置'],
-  'auto-parse': ['自动解析与上下文注入'],
-  tool: ['ChatLuna 工具设置'],
+  'auto-parse': ['自动解析设置'],
+  debug: ['调试设置'],
 }
 
 const STYLE_ID = 'social-media-parser-nav-style'

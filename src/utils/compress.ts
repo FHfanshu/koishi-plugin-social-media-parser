@@ -392,11 +392,39 @@ async function resolveFfprobeBinary(): Promise<string | null> {
     return byEnv
   }
 
+  const derivedFromFfmpegEnv = deriveFfprobePathFromFfmpeg(process.env.FFMPEG_PATH)
+  if (derivedFromFfmpegEnv && await canAccessBinary(derivedFromFfmpegEnv)) {
+    return derivedFromFfmpegEnv
+  }
+
   if (await canAccessBinary('ffprobe')) {
     return 'ffprobe'
   }
 
   return null
+}
+
+function deriveFfprobePathFromFfmpeg(ffmpegPath: string | undefined): string | null {
+  if (!ffmpegPath) {
+    return null
+  }
+
+  if (!ffmpegPath.includes('/')) {
+    if (ffmpegPath === 'ffmpeg') {
+      return 'ffprobe'
+    }
+    return null
+  }
+
+  const dir = path.dirname(ffmpegPath)
+  const ext = path.extname(ffmpegPath)
+  const base = path.basename(ffmpegPath, ext)
+  const probeBase = base.replace(/ffmpeg/i, 'ffprobe')
+  if (probeBase === base) {
+    return null
+  }
+
+  return path.join(dir, `${probeBase}${ext}`)
 }
 
 async function canAccessBinary(bin: string): Promise<boolean> {

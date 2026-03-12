@@ -1,6 +1,6 @@
 import { Schema } from 'koishi'
 
-import type { SendMode, ToolContentLevel } from './types'
+import type { SendMode, VideoSendMode } from './types'
 
 export const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -20,14 +20,26 @@ export interface MediaInjectConfig {
   ffmpegTimeoutMs: number
 }
 
+export interface NetworkConfig {
+  timeoutMs: number
+  cooldownMs: number
+}
+
+export interface MediaConfig {
+  maxBytes: number
+  maxVideoBytes: number
+  maxDurationSec: number
+  sendMode: SendMode
+  videoSendMode: VideoSendMode
+  fallbackToUrlOnError: boolean
+}
+
 export interface DouyinConfig {
   enabled: boolean
-  apiBaseUrl: string
-  fallbackApiBaseUrls: string[]
-  rapidApiKey: string
-  rapidApiHost: string
-  rapidApiEndpointPath: string
-  rapidApiUrlParamKey: string
+  api: {
+    baseUrl: string
+    fallbackUrls: string[]
+  }
   maxImages: number
 }
 
@@ -46,46 +58,33 @@ export interface BilibiliConfig {
 
 export interface TwitterConfig {
   enabled: boolean
-  rapidApiKey: string
-  rapidApiHost: string
-  endpointPath: string
   maxImages: number
+  grok: {
+    enabled: boolean
+    baseUrl?: string
+    apiKey?: string
+    model: string
+    timeoutMs: number
+  }
+  routing: {
+    textProviderOrder: string
+    imageProviderOrder: string
+    videoProviderOrder: string
+    translationProviderOrder: string
+  }
+  translation: {
+    enabled: boolean
+    targetLanguage: string
+    maxChars: number
+    showOriginal: boolean
+  }
 }
 
-export interface TwitterGrokConfig {
-  enabled: boolean
-  baseUrl: string
-  apiKey: string
-  model: string
-  timeoutMs: number
-}
-
-export interface TwitterRoutingConfig {
-  textProviderOrder: string
-  imageProviderOrder: string
-  videoProviderOrder: string
-  translationProviderOrder: string
-}
-
-export interface TwitterTranslationConfig {
-  enabled: boolean
-  targetLanguage: string
-  maxChars: number
-  showOriginal: boolean
-}
-
-export interface TwitterSendPolicyConfig {
-  forwardTextAndImages: boolean
-  videoAsPlainMessage: boolean
-}
-
-export interface YouTubeConfig {
-  enabled: boolean
-  rapidApiKey: string
-  rapidApiHost: string
-  endpointPath: string
-  urlParamKey: string
-  maxImages: number
+export interface PlatformsConfig {
+  douyin: DouyinConfig
+  xiaohongshu: XiaohongshuConfig
+  bilibili: BilibiliConfig
+  twitter: TwitterConfig
 }
 
 export interface ForwardConfig {
@@ -93,7 +92,6 @@ export interface ForwardConfig {
   nickname: string
   includeMusic: boolean
   autoMergeForward: boolean
-  experimentalForwardVideo: boolean
   longTextThreshold: number
   imageMergeThreshold: number
   textChunkSize: number
@@ -102,61 +100,22 @@ export interface ForwardConfig {
 
 export interface AutoParseConfig {
   enabled: boolean
-  blockedGuilds: string[]
-  blockedUsers: string[]
+  onlyGroup: boolean
+  blacklist: {
+    guilds: string[]
+    users: string[]
+  }
   maxUrlsPerMessage: number
-  injectContext: boolean
-}
-
-export interface ToolConfig {
-  enabled: boolean
-  toolName: string
-  toolDescription: string
-  contentLevel: ToolContentLevel
 }
 
 export interface Config {
-  enabled: boolean
-  onlyGroup: boolean
-  cooldownMs: number
-  timeoutMs: number
-  maxMediaBytes: number
-  maxVideoDownloadBytes: number
-  maxVideoDurationSec: number
-  sendMode: SendMode
-  fallbackToUrlOnError: boolean
-  debug: boolean
-  douyin: DouyinConfig
-  xiaohongshu: XiaohongshuConfig
-  bilibili: BilibiliConfig
-  twitter: TwitterConfig
-  twitterGrok: TwitterGrokConfig
-  twitterRouting: TwitterRoutingConfig
-  twitterTranslation: TwitterTranslationConfig
-  twitterSendPolicy: TwitterSendPolicyConfig
-  youtube: YouTubeConfig
+  network: NetworkConfig
+  media: MediaConfig
+  platforms: PlatformsConfig
   forward: ForwardConfig
   autoParse: AutoParseConfig
-  tool: ToolConfig
+  debug: boolean
 }
-
-const MediaInjectSchema: Schema<MediaInjectConfig> = Schema.object({
-  enabled: Schema.boolean().default(true).description('启用媒体注入'),
-  maxImages: Schema.number().default(3).min(0).max(12).description('最多注入图片数量'),
-  imageMaxEdgePx: Schema.number().default(800).min(256).max(1920).description('图片压缩最大边长（像素）'),
-  imageQuality: Schema.number().default(75).min(35).max(95).description('图片 JPEG 质量（1-100）'),
-  videoEnabled: Schema.boolean().default(true).description('启用视频注入'),
-  videoResolution: Schema.union([
-    Schema.const(480).description('480p（更省流量）'),
-    Schema.const(720).description('720p（更清晰）')
-  ]).default(480).description('视频压缩分辨率高度'),
-  videoMaxDurationSec: Schema.number().default(60).min(10).max(300).description('短视频最大时长（秒）'),
-  longVideoFrameIntervalSec: Schema.number().default(5).min(1).max(30).description('长视频抽帧间隔（秒）'),
-  longVideoMaxFrames: Schema.number().default(12).min(1).max(60).description('长视频最多注入帧数'),
-  keepAudio: Schema.boolean().default(true).description('长视频抽帧模式保留音频注入（不压缩）'),
-  maxTotalBytes: Schema.number().default(10 * 1024 * 1024).description('单次注入媒体总大小上限（bytes）'),
-  ffmpegTimeoutMs: Schema.number().default(30_000).min(3_000).max(180_000).description('ffmpeg 处理超时（毫秒）'),
-})
 
 export const DEFAULT_MEDIA_INJECT_CONFIG: MediaInjectConfig = {
   enabled: true,
@@ -175,110 +134,251 @@ export const DEFAULT_MEDIA_INJECT_CONFIG: MediaInjectConfig = {
 
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
-    enabled: Schema.boolean().default(true).description('启用插件'),
-    onlyGroup: Schema.boolean().default(true).description('仅在群聊触发自动解析'),
-    cooldownMs: Schema.number().default(8_000).description('同一链接冷却时间（毫秒）'),
-    timeoutMs: Schema.number().default(15_000).description('网络请求超时（毫秒）'),
-    maxMediaBytes: Schema.number().default(15 * 1024 * 1024).description('消息发送时单个媒体最大下载大小（bytes）'),
-    maxVideoDownloadBytes: Schema.number().default(512 * 1024 * 1024).min(8 * 1024 * 1024).max(2 * 1024 * 1024 * 1024).description('视频下载最大大小（bytes，用于时长探测与视频处理；建议大于 maxMediaBytes）'),
-    maxVideoDurationSec: Schema.number().default(1800).min(60).max(7200).description('视频最大时长（秒），超出则跳过解析。默认 1800 秒（30 分钟）'),
-    sendMode: Schema.union([
-      Schema.const('base64').description('下载后转 base64 发送（更稳定）'),
-      Schema.const('url').description('直接发送 URL（更省流量）')
-    ]).default('base64').description('消息发送模式'),
-    fallbackToUrlOnError: Schema.boolean().default(true).description('base64 发送失败回退到 URL'),
-    debug: Schema.boolean().default(false).description('输出调试日志'),
-  }).description('基础设置'),
+    network: Schema.object({
+      cooldownMs: Schema.number().default(8_000).description('同一链接冷却时间（毫秒）'),
+      timeoutMs: Schema.number().default(15_000).description('网络请求超时（毫秒）'),
+    }).description('网络设置'),
+    media: Schema.object({
+      maxBytes: Schema.number().default(15 * 1024 * 1024).description('消息发送时单个媒体最大下载大小（bytes）'),
+      maxVideoBytes: Schema.number().default(512 * 1024 * 1024).min(8 * 1024 * 1024).max(2 * 1024 * 1024 * 1024).description('视频下载最大大小（bytes，用于时长探测与视频处理；建议大于 maxBytes）'),
+      maxDurationSec: Schema.number().default(1800).min(60).max(7200).description('视频最大时长（秒），超出则跳过解析。默认 1800 秒（30 分钟）'),
+      sendMode: Schema.union([
+        Schema.const('base64').description('下载后转 base64 发送（更稳定）'),
+        Schema.const('url').description('直接发送 URL（更省流量）')
+      ]).default('base64').description('消息发送模式'),
+      videoSendMode: Schema.union([
+        Schema.const('storage').description('下载视频后优先交给 chatluna storage service 托管；无 storage 时回退 base64'),
+        Schema.const('base64').description('下载视频后使用 base64:// 发送（OneBot 更稳）'),
+        Schema.const('url').description('直接发送视频直链（最省流量，但平台兼容性最差）')
+      ]).default('base64').description('视频发送模式'),
+      fallbackToUrlOnError: Schema.boolean().default(true).description('下载/发送失败时允许回退到直链（OneBot 下的非 url 视频模式不会回退）'),
+    }).description('媒体与发送设置'),
+  }).description('网络与媒体设置'),
   Schema.object({
-    douyin: Schema.object({
-      enabled: Schema.boolean().default(true).description('启用抖音解析'),
-      apiBaseUrl: Schema.string().default('https://api.douyin.wtf').description('Douyin_TikTok_Download_API 地址'),
-      fallbackApiBaseUrls: Schema.array(String).role('table').default([]).description('抖音解析备用 API 地址列表（按顺序回退）'),
-      rapidApiKey: Schema.string().role('secret').default('').description('RapidAPI Key（X-RapidAPI-Key），配置后在常规 API 失败时作为备用解析链路'),
-      rapidApiHost: Schema.string().default('').description('RapidAPI Host（X-RapidAPI-Host），例如 xxx.p.rapidapi.com'),
-      rapidApiEndpointPath: Schema.string().default('/api/hybrid/video_data').description('RapidAPI 端点路径（例如 /api/hybrid/video_data 或 /download）'),
-      rapidApiUrlParamKey: Schema.string().default('url').description('RapidAPI 中链接参数名（默认 url）'),
-      maxImages: Schema.number().default(9).min(1).max(20).description('图文最多保留图片数量'),
-    }).description('抖音解析设置'),
-    xiaohongshu: Schema.object({
-      enabled: Schema.boolean().default(true).description('启用小红书解析'),
-      userAgent: Schema.string().default(DEFAULT_USER_AGENT).description('抓取页面使用的 User-Agent'),
-      maxRetries: Schema.number().default(3).min(1).max(6).description('抓取失败重试次数'),
-      maxImages: Schema.number().default(20).min(1).max(40).description('图文最多保留图片数量'),
-    }).description('小红书解析设置'),
-    bilibili: Schema.object({
-      enabled: Schema.boolean().default(true).description('启用 Bilibili 解析'),
-      fetchVideo: Schema.boolean().default(true).description('尝试获取视频直链（第三方 API，可能不稳定）'),
-      maxDescLength: Schema.number().default(100).min(20).max(500).description('视频简介最大字符数'),
-    }).description('Bilibili 解析设置'),
-    twitter: Schema.object({
-      enabled: Schema.boolean().default(false).description('启用 Twitter/X 解析（RapidAPI）'),
-      rapidApiKey: Schema.string().role('secret').default('').description('RapidAPI Key（X-RapidAPI-Key）'),
-      rapidApiHost: Schema.string().default('twitter-x-video-downloader-api.p.rapidapi.com').description('RapidAPI Host（X-RapidAPI-Host）'),
-      endpointPath: Schema.string().default('/download').description('RapidAPI 端点路径（如 /download）'),
-      maxImages: Schema.number().default(9).min(1).max(20).description('图片推文最多保留图片数量'),
-    }).description('Twitter/X 解析设置（RapidAPI）'),
-    youtube: Schema.object({
-      enabled: Schema.boolean().default(false).description('启用 YouTube 解析（Snap Video RapidAPI）'),
-      rapidApiKey: Schema.string().role('secret').default('').description('RapidAPI Key（X-RapidAPI-Key）'),
-      rapidApiHost: Schema.string().default('snap-video3.p.rapidapi.com').description('RapidAPI Host（X-RapidAPI-Host）'),
-      endpointPath: Schema.string().default('/download').description('RapidAPI 端点路径（默认 /download）'),
-      urlParamKey: Schema.string().default('url').description('请求参数名（默认 url）'),
-      maxImages: Schema.number().default(3).min(0).max(12).description('缩略图最多保留图片数量'),
-    }).description('YouTube 解析设置'),
+    platforms: Schema.object({
+      douyin: Schema.object({
+        enabled: Schema.boolean().default(true).description('启用抖音解析'),
+        api: Schema.object({
+          baseUrl: Schema.string().default('https://api.douyin.wtf').description('Douyin_TikTok_Download_API 地址'),
+          fallbackUrls: Schema.array(String).role('table').default([]).description('抖音解析备用 API 地址列表（按顺序回退）'),
+        }).description('抖音 API 设置'),
+        maxImages: Schema.number().default(9).min(1).max(20).description('图文最多保留图片数量'),
+      }).description('抖音解析设置'),
+      xiaohongshu: Schema.object({
+        enabled: Schema.boolean().default(true).description('启用小红书解析'),
+        userAgent: Schema.string().default(DEFAULT_USER_AGENT).description('抓取页面使用的 User-Agent'),
+        maxRetries: Schema.number().default(3).min(1).max(6).description('抓取失败重试次数'),
+        maxImages: Schema.number().default(20).min(1).max(40).description('图文最多保留图片数量'),
+      }).description('小红书解析设置'),
+      bilibili: Schema.object({
+        enabled: Schema.boolean().default(true).description('启用 Bilibili 解析'),
+        fetchVideo: Schema.boolean().default(true).description('尝试获取视频直链（第三方 API，可能不稳定）'),
+        maxDescLength: Schema.number().default(100).min(20).max(500).description('视频简介最大字符数'),
+      }).description('Bilibili 解析设置'),
+      twitter: Schema.object({
+        enabled: Schema.boolean().default(false).description('启用 Twitter/X 解析（FxTwitter/Grok）'),
+        maxImages: Schema.number().default(9).min(1).max(20).description('图片推文最多保留图片数量'),
+        grok: Schema.object({
+          enabled: Schema.boolean().default(false).description('启用 Grok 作为 Twitter/X 文本与图片解析来源'),
+          model: Schema.dynamic('model').default('grok-4.1-fast').description('Grok 模型（使用 ChatLuna 模型下拉）'),
+          timeoutMs: Schema.number().default(35_000).min(3_000).max(180_000).description('Grok 请求超时（毫秒）'),
+        }).description('Twitter/X Grok 设置'),
+        routing: Schema.object({
+          textProviderOrder: Schema.string().default('fxtwitter,grok').description('文本解析优先级（逗号分隔：fxtwitter,grok）'),
+          imageProviderOrder: Schema.string().default('fxtwitter,grok').description('图片解析优先级（逗号分隔：fxtwitter,grok）'),
+          videoProviderOrder: Schema.string().default('fxtwitter,grok').description('视频解析优先级（逗号分隔：fxtwitter,grok）'),
+          translationProviderOrder: Schema.string().default('grok').description('翻译优先级（当前仅支持：grok）'),
+        }).description('Twitter/X 路由优先级设置'),
+        translation: Schema.object({
+          enabled: Schema.boolean().default(false).description('启用 Twitter/X 正文翻译'),
+          targetLanguage: Schema.string().default('zh-CN').description('翻译目标语言（如 zh-CN）'),
+          maxChars: Schema.number().default(1200).min(80).max(10_000).description('翻译前截断最大字符数'),
+          showOriginal: Schema.boolean().default(true).description('发送时保留原文（关闭后仅展示译文）'),
+        }).description('Twitter/X 翻译设置'),
+      }).description('Twitter/X 解析设置'),
+    }),
+  }).description('平台设置'),
+  Schema.object({
+    autoParse: Schema.object({
+      enabled: Schema.boolean().default(true).description('启用自动解析中间件'),
+      onlyGroup: Schema.boolean().default(true).description('仅在群聊触发自动解析'),
+      blacklist: Schema.object({
+        guilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（支持 platform:guildId）'),
+        users: Schema.array(String).role('table').default([]).description('自动解析 user 黑名单（支持 platform:userId）'),
+      }).description('自动解析黑名单'),
+      maxUrlsPerMessage: Schema.number().default(3).min(1).max(10).description('单条消息最多解析链接数量'),
+    }).description('自动解析设置'),
     forward: Schema.object({
       enabled: Schema.boolean().default(true).description('图片内容优先使用合并转发（OneBot）'),
       nickname: Schema.string().default('内容解析').description('合并转发显示昵称'),
       includeMusic: Schema.boolean().default(true).description('抖音图文转发时附带背景音乐'),
       autoMergeForward: Schema.boolean().default(true).description('长文本/多图自动合并转发，减少刷屏'),
-      experimentalForwardVideo: Schema.boolean().default(false).description('实验性：允许将视频放入合并转发节点（默认关闭，可能触发平台兼容问题）'),
       longTextThreshold: Schema.number().default(260).min(80).max(2_000).description('触发自动合并转发的文本长度阈值'),
       imageMergeThreshold: Schema.number().default(2).min(1).max(20).description('触发自动合并转发的图片数量阈值'),
       textChunkSize: Schema.number().default(280).min(80).max(1_000).description('合并转发模式下文本分片长度'),
       maxForwardNodes: Schema.number().default(25).min(5).max(80).description('单次合并转发最多节点数'),
     }).description('转发消息设置'),
-  }).description('平台解析设置'),
+  }).description('自动解析与转发设置'),
   Schema.object({
-    twitterGrok: Schema.object({
-      enabled: Schema.boolean().default(false).description('启用 Grok 作为 Twitter/X 文本与图片解析来源'),
-      baseUrl: Schema.string().default('http://127.0.0.1:28000').description('Grok OpenAI 兼容接口地址（不带 /v1/chat/completions 也可）'),
-      apiKey: Schema.string().role('secret').default('').description('Grok 接口 API Key'),
-      model: Schema.dynamic('model').default('grok-4.1-fast').description('Grok 模型（使用 ChatLuna 模型下拉）'),
-      timeoutMs: Schema.number().default(35_000).min(3_000).max(180_000).description('Grok 请求超时（毫秒）'),
-    }).description('Twitter/X Grok 设置'),
-    twitterRouting: Schema.object({
-      textProviderOrder: Schema.string().default('grok,rapidapi').description('文本解析优先级（逗号分隔：grok,rapidapi）'),
-      imageProviderOrder: Schema.string().default('grok,rapidapi').description('图片解析优先级（逗号分隔：grok,rapidapi）'),
-      videoProviderOrder: Schema.string().default('rapidapi,grok').description('视频解析优先级（逗号分隔：rapidapi,grok）'),
-      translationProviderOrder: Schema.string().default('grok,rapidapi').description('翻译优先级（逗号分隔：grok,rapidapi）'),
-    }).description('Twitter/X 路由优先级设置'),
-    twitterTranslation: Schema.object({
-      enabled: Schema.boolean().default(false).description('启用 Twitter/X 正文翻译'),
-      targetLanguage: Schema.string().default('zh-CN').description('翻译目标语言（如 zh-CN）'),
-      maxChars: Schema.number().default(1200).min(80).max(10_000).description('翻译前截断最大字符数'),
-      showOriginal: Schema.boolean().default(true).description('发送时保留原文（关闭后仅展示译文）'),
-    }).description('Twitter/X 翻译设置'),
-    twitterSendPolicy: Schema.object({
-      forwardTextAndImages: Schema.boolean().default(true).description('Twitter/X 图文与译文优先合并转发'),
-      videoAsPlainMessage: Schema.boolean().default(true).description('Twitter/X 视频始终普通消息发送（不进合并转发）'),
-    }).description('Twitter/X 发送策略设置'),
-  }).description('Twitter/X 增强设置'),
-  Schema.object({
-    autoParse: Schema.object({
-      enabled: Schema.boolean().default(true).description('启用自动解析中间件'),
-      blockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（支持 platform:guildId）'),
-      blockedUsers: Schema.array(String).role('table').default([]).description('自动解析 user 黑名单（支持 platform:userId）'),
-      maxUrlsPerMessage: Schema.number().default(3).min(1).max(10).description('单条消息最多解析链接数量'),
-      injectContext: Schema.boolean().default(false).description('自动解析后静默注入 ChatLuna 上下文（默认关闭）'),
-    }).description('自动解析与上下文注入'),
-    tool: Schema.object({
-      enabled: Schema.boolean().default(false).description('注册 ChatLuna 工具（默认关闭）'),
-      toolName: Schema.string().default('parse_social_media').description('工具名称'),
-      toolDescription: Schema.string().default('解析抖音、小红书、Bilibili、Twitter(X) 或 YouTube 链接并返回结构化内容摘要。').description('工具描述'),
-      contentLevel: Schema.union([
-        Schema.const('summary').description('返回摘要（推荐）'),
-        Schema.const('full').description('返回尽可能完整的正文与媒体列表')
-      ]).default('summary').description('工具返回内容级别'),
-    }).description('ChatLuna 工具设置'),
-  }).description('自动解析与工具设置'),
+    debug: Schema.boolean().default(false).description('输出调试日志'),
+  }).description('调试设置'),
 ])
+
+export interface MigrationResult {
+  config: Config
+  usedLegacyKeys: string[]
+}
+
+export function migrateConfig(rawConfig: unknown): MigrationResult {
+  const source = (rawConfig && typeof rawConfig === 'object') ? rawConfig as Record<string, any> : {}
+  const migrated: Record<string, any> = {
+    ...source,
+    network: isRecord(source.network) ? { ...source.network } : {},
+    media: isRecord(source.media) ? { ...source.media } : {},
+    autoParse: isRecord(source.autoParse)
+      ? {
+          ...source.autoParse,
+          blacklist: isRecord(source.autoParse.blacklist) ? { ...source.autoParse.blacklist } : {},
+        }
+      : { blacklist: {} },
+    platforms: isRecord(source.platforms)
+      ? {
+          ...source.platforms,
+          douyin: isRecord(source.platforms.douyin)
+            ? {
+                ...source.platforms.douyin,
+                api: isRecord(source.platforms.douyin.api) ? { ...source.platforms.douyin.api } : {},
+              }
+            : { api: {} },
+          xiaohongshu: isRecord(source.platforms.xiaohongshu) ? { ...source.platforms.xiaohongshu } : {},
+          bilibili: isRecord(source.platforms.bilibili) ? { ...source.platforms.bilibili } : {},
+          twitter: isRecord(source.platforms.twitter)
+            ? {
+                ...source.platforms.twitter,
+                grok: isRecord(source.platforms.twitter.grok) ? { ...source.platforms.twitter.grok } : {},
+                routing: isRecord(source.platforms.twitter.routing) ? { ...source.platforms.twitter.routing } : {},
+                translation: isRecord(source.platforms.twitter.translation) ? { ...source.platforms.twitter.translation } : {},
+              }
+            : { grok: {}, routing: {}, translation: {} },
+        }
+      : {
+          douyin: { api: {} },
+          xiaohongshu: {},
+          bilibili: {},
+          twitter: { grok: {}, routing: {}, translation: {} },
+        },
+  }
+
+  const usedLegacyKeys: string[] = []
+
+  moveLegacy(source, migrated, usedLegacyKeys, 'timeoutMs', 'network.timeoutMs')
+  moveLegacy(source, migrated, usedLegacyKeys, 'cooldownMs', 'network.cooldownMs')
+  moveLegacy(source, migrated, usedLegacyKeys, 'maxMediaBytes', 'media.maxBytes')
+  moveLegacy(source, migrated, usedLegacyKeys, 'maxVideoDownloadBytes', 'media.maxVideoBytes')
+  moveLegacy(source, migrated, usedLegacyKeys, 'maxVideoDurationSec', 'media.maxDurationSec')
+  moveLegacy(source, migrated, usedLegacyKeys, 'sendMode', 'media.sendMode')
+  moveLegacy(source, migrated, usedLegacyKeys, 'videoSendMode', 'media.videoSendMode')
+  moveLegacy(source, migrated, usedLegacyKeys, 'fallbackToUrlOnError', 'media.fallbackToUrlOnError')
+  moveLegacy(source, migrated, usedLegacyKeys, 'onlyGroup', 'autoParse.onlyGroup')
+  moveLegacy(source, migrated, usedLegacyKeys, 'autoParse.blockedGuilds', 'autoParse.blacklist.guilds')
+  moveLegacy(source, migrated, usedLegacyKeys, 'autoParse.blockedUsers', 'autoParse.blacklist.users')
+  moveLegacy(source, migrated, usedLegacyKeys, 'douyin.enabled', 'platforms.douyin.enabled')
+  moveLegacy(source, migrated, usedLegacyKeys, 'douyin.apiBaseUrl', 'platforms.douyin.api.baseUrl')
+  moveLegacy(source, migrated, usedLegacyKeys, 'douyin.fallbackApiBaseUrls', 'platforms.douyin.api.fallbackUrls')
+  moveLegacy(source, migrated, usedLegacyKeys, 'douyin.maxImages', 'platforms.douyin.maxImages')
+  moveLegacy(source, migrated, usedLegacyKeys, 'xiaohongshu.enabled', 'platforms.xiaohongshu.enabled')
+  moveLegacy(source, migrated, usedLegacyKeys, 'xiaohongshu.userAgent', 'platforms.xiaohongshu.userAgent')
+  moveLegacy(source, migrated, usedLegacyKeys, 'xiaohongshu.maxRetries', 'platforms.xiaohongshu.maxRetries')
+  moveLegacy(source, migrated, usedLegacyKeys, 'xiaohongshu.maxImages', 'platforms.xiaohongshu.maxImages')
+  moveLegacy(source, migrated, usedLegacyKeys, 'bilibili.enabled', 'platforms.bilibili.enabled')
+  moveLegacy(source, migrated, usedLegacyKeys, 'bilibili.fetchVideo', 'platforms.bilibili.fetchVideo')
+  moveLegacy(source, migrated, usedLegacyKeys, 'bilibili.maxDescLength', 'platforms.bilibili.maxDescLength')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitter.enabled', 'platforms.twitter.enabled')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitter.maxImages', 'platforms.twitter.maxImages')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterGrok.enabled', 'platforms.twitter.grok.enabled')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterGrok.baseUrl', 'platforms.twitter.grok.baseUrl')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterGrok.apiKey', 'platforms.twitter.grok.apiKey')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterGrok.model', 'platforms.twitter.grok.model')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterGrok.timeoutMs', 'platforms.twitter.grok.timeoutMs')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterRouting.textProviderOrder', 'platforms.twitter.routing.textProviderOrder')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterRouting.imageProviderOrder', 'platforms.twitter.routing.imageProviderOrder')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterRouting.videoProviderOrder', 'platforms.twitter.routing.videoProviderOrder')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterRouting.translationProviderOrder', 'platforms.twitter.routing.translationProviderOrder')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterTranslation.enabled', 'platforms.twitter.translation.enabled')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterTranslation.targetLanguage', 'platforms.twitter.translation.targetLanguage')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterTranslation.maxChars', 'platforms.twitter.translation.maxChars')
+  moveLegacy(source, migrated, usedLegacyKeys, 'twitterTranslation.showOriginal', 'platforms.twitter.translation.showOriginal')
+
+  if (!hasPath(migrated, 'media.videoSendMode')) {
+    const legacySendMode = getPath(migrated, 'media.sendMode')
+    migrated.media.videoSendMode = legacySendMode === 'url' ? 'url' : 'base64'
+  }
+
+  return {
+    config: migrated as Config,
+    usedLegacyKeys: Array.from(new Set(usedLegacyKeys)),
+  }
+}
+
+function moveLegacy(
+  source: Record<string, any>,
+  target: Record<string, any>,
+  usedLegacyKeys: string[],
+  legacyPath: string,
+  nextPath: string,
+): void {
+  if (!hasPath(source, legacyPath)) {
+    return
+  }
+
+  const value = getPath(source, legacyPath)
+  setPath(target, nextPath, value)
+  usedLegacyKeys.push(legacyPath)
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function hasPath(source: Record<string, any>, path: string): boolean {
+  const keys = path.split('.')
+  let cursor: any = source
+  for (const key of keys) {
+    if (!isRecord(cursor)) {
+      return false
+    }
+    if (!Object.prototype.hasOwnProperty.call(cursor, key)) {
+      return false
+    }
+    cursor = cursor[key]
+  }
+  return true
+}
+
+function getPath(source: Record<string, any>, path: string): any {
+  const keys = path.split('.')
+  let cursor: any = source
+  for (const key of keys) {
+    if (!isRecord(cursor) && !Array.isArray(cursor)) {
+      return undefined
+    }
+    cursor = cursor[key]
+  }
+  return cursor
+}
+
+function setPath(target: Record<string, any>, path: string, value: any): void {
+  const keys = path.split('.')
+  let cursor: Record<string, any> = target
+
+  for (let i = 0; i < keys.length - 1; i += 1) {
+    const key = keys[i]
+    const current = cursor[key]
+    if (!isRecord(current)) {
+      cursor[key] = {}
+    }
+    cursor = cursor[key]
+  }
+
+  cursor[keys[keys.length - 1]] = value
+}

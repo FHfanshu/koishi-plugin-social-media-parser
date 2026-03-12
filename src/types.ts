@@ -1,10 +1,10 @@
-export type SocialPlatform = 'douyin' | 'xiaohongshu' | 'bilibili' | 'twitter' | 'youtube'
+export type SocialPlatform = 'douyin' | 'xiaohongshu' | 'bilibili' | 'twitter'
 
 export type SendMode = 'base64' | 'url'
 
-export type ToolContentLevel = 'summary' | 'full'
+export type VideoSendMode = 'storage' | 'base64' | 'url'
 
-export type TwitterProvider = 'rapidapi' | 'grok'
+export type TwitterProvider = 'fxtwitter' | 'grok'
 
 export interface ParsedContent {
   platform: SocialPlatform

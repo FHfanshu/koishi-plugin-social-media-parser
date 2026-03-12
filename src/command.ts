@@ -8,7 +8,7 @@ import { sendParsedContent } from './utils/media'
 export function registerParseCommand(ctx: Context, config: Config): void {
   const logger = ctx.logger('social-media-parser')
 
-  ctx.command('parse <url:text>', '解析抖音/小红书/B站/Twitter(X)/YouTube 链接')
+  ctx.command('parse <url:text>', '解析抖音/小红书/B站/Twitter(X) 链接')
     .alias('social-parse')
     .action(async ({ session }, url) => {
       if (!url) {
@@ -21,7 +21,7 @@ export function registerParseCommand(ctx: Context, config: Config): void {
 
       const normalized = normalizeInputUrl(url)
       if (!normalized) {
-        return '链接无效，或不属于抖音/小红书/B站/Twitter(X)/YouTube 域名。'
+        return '链接无效，或不属于抖音/小红书/B站/Twitter(X) 域名。'
       }
 
       try {

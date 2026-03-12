@@ -1,16 +1,17 @@
 # koishi-plugin-social-media-parser
 
-抖音 + 小红书 + Bilibili + Twitter(X) + YouTube 五合一解析插件，支持自动解析、手动命令和 ChatLuna 工具调用。
+抖音 + 小红书 + Bilibili + Twitter(X) 解析插件，支持自动解析、手动命令和 ChatLuna 工具调用。
 
 ## 功能
 
-- 自动解析抖音/小红书/Bilibili/Twitter(X)/YouTube 链接（支持 guild 黑名单）
+- 自动解析抖音/小红书/Bilibili/Twitter(X) 链接（支持群/用户黑名单）
 - 手动命令：`parse <url>`
 - ChatLuna 工具：`parse_social_media`
 - 自动解析后可静默注入 ChatLuna 上下文
 - 媒体注入链路支持图片压缩、短视频压缩、长视频抽帧+保留音频
 - 长文本/多图自动合并转发，减少刷屏
 - 抖音解析使用 Douyin_TikTok_Download_API（`/api/hybrid/video_data`）
+- Twitter/X 解析支持 fxtwitter 与 Grok 路由组合
 
 默认行为：
 
@@ -19,20 +20,14 @@
 
 ## 配置要点
 
-- `douyin.apiBaseUrl`: Douyin_TikTok_Download_API 地址（默认 `https://api.douyin.wtf`）
-- `douyin.fallbackApiBaseUrls`: 备用抖音 API 地址列表（主 API 失败时按顺序回退）
-- `douyin.rapidApiKey`: RapidAPI Key（可选，常规 API 全失败时启用 RapidAPI 回退）
-- `douyin.rapidApiHost`: RapidAPI Host（例如 `xxx.p.rapidapi.com`）
-- `douyin.rapidApiEndpointPath`: RapidAPI 端点路径（默认 `/api/hybrid/video_data`）
-- `douyin.rapidApiUrlParamKey`: RapidAPI URL 参数名（默认 `url`）
-- `youtube.enabled`: 启用 YouTube 解析（默认关闭）
-- `youtube.rapidApiKey`: Snap Video RapidAPI Key（`x-rapidapi-key`）
-- `youtube.rapidApiHost`: Snap Video RapidAPI Host（默认 `snap-video3.p.rapidapi.com`）
-- `youtube.endpointPath`: Snap Video 端点路径（默认 `/download`）
-- `youtube.urlParamKey`: YouTube 链接参数名（默认 `url`）
-- `autoParse.blockedGuilds`: 自动解析群黑名单
-- `autoParse.blockedUsers`: 自动解析用户黑名单
-- `autoParse.injectContext`: 自动解析后注入上下文
+- `platforms.douyin.api.baseUrl`: 抖音 API 主地址（默认 `https://api.douyin.wtf`）
+- `platforms.douyin.api.fallbackUrls`: 抖音 API 备用地址列表（按顺序回退）
+- `platforms.twitter.enabled`: 启用 Twitter/X 解析（fxtwitter/Grok 路由）
+- `platforms.twitter.grok.*`: Grok 解析来源开关、模型和超时（地址与密钥默认复用 ChatLuna 平台配置）
+- `platforms.twitter.routing.*`: 文本/图片/视频/翻译 provider 优先级（`grok` 与 `fxtwitter`）
+- `media.videoSendMode`: 视频发送模式（`storage` / `base64` / `url`）
+- `autoParse.blacklist.guilds`: 自动解析群黑名单
+- `autoParse.blacklist.users`: 自动解析用户黑名单
 - `autoParse.injectContext`: 自动解析后注入上下文（默认关闭）
 - `forward.autoMergeForward`: 长文本/多图自动合并转发
 

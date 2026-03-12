@@ -1,8 +1,6 @@
 import type { Context } from 'koishi'
 
 import type { Config } from './config'
-import { DEFAULT_MEDIA_INJECT_CONFIG } from './config'
-import { injectParsedContext } from './context'
 import { parseSocialUrl } from './parse'
 import { sendParsedContent } from './utils/media'
 import { detectPlatformByUrl, extractSocialUrlsFromSession, isBlocked } from './utils/url'
@@ -18,11 +16,11 @@ export function registerAutoParseMiddleware(
   const logger = ctx.logger('social-media-parser')
 
   ctx.middleware(async (session, next) => {
-    if (!config.enabled || !config.autoParse.enabled) {
+    if (!config.autoParse.enabled) {
       return next()
     }
 
-    if (config.onlyGroup && !session.guildId) {
+    if (config.autoParse.onlyGroup && !session.guildId) {
       return next()
     }
 
@@ -35,16 +33,16 @@ export function registerAutoParseMiddleware(
       if (config.debug) {
         const preview = typeof session.content === 'string' ? session.content.slice(0, 180) : ''
         const raw = typeof session.content === 'string' ? session.content : ''
-        if (/(douyin|iesdouyin|xiaohongshu|xhslink|bilibili|b23\.tv|twitter|x\.com|t\.co|fxtwitter|vxtwitter|youtube|youtu\.be)/i.test(raw)) {
+        if (/(douyin|iesdouyin|xiaohongshu|xhslink|bilibili|b23\.tv|twitter|x\.com|t\.co|fxtwitter|vxtwitter)/i.test(raw)) {
           logger.info(`auto parse skipped: no social url detected, channel=${session.channelId || 'unknown'}, preview=${preview}`)
         }
       }
       return next()
     }
 
-    cleanupCooldownMap(cooldownMap, Date.now(), config.cooldownMs)
+    cleanupCooldownMap(cooldownMap, Date.now(), config.network.cooldownMs)
 
-    if (isBlocked(session, config.autoParse.blockedGuilds, config.autoParse.blockedUsers)) {
+    if (isBlocked(session, config.autoParse.blacklist.guilds, config.autoParse.blacklist.users)) {
       if (config.debug) {
         logger.info(`auto parse blocked by blacklist: guild=${session.guildId || ''}, channel=${session.channelId || ''}, user=${session.userId || ''}`)
       }
@@ -66,7 +64,7 @@ export function registerAutoParseMiddleware(
 
       const cooldownKey = `${session.channelId || session.guildId || session.userId}:${url}`
       const lastTime = cooldownMap.get(cooldownKey) ?? 0
-      if (Date.now() - lastTime < config.cooldownMs) {
+      if (Date.now() - lastTime < config.network.cooldownMs) {
         if (config.debug) {
           logger.info(`auto parse cooldown hit: ${url}`)
         }
@@ -91,23 +89,6 @@ export function registerAutoParseMiddleware(
         resolvedSet.add(resolvedKey)
 
         await sendParsedContent(ctx, session, parsed, config, logger)
-
-        if (config.autoParse.injectContext) {
-          await injectParsedContext(
-            ctx,
-            session,
-            parsed,
-            {
-              contextMaxChars: 500,
-              injectMedia: false,
-              mediaInject: DEFAULT_MEDIA_INJECT_CONFIG,
-              maxVideoDurationSec: config.maxVideoDurationSec,
-              maxVideoDownloadBytes: config.maxVideoDownloadBytes,
-            },
-            logger,
-            'auto'
-          )
-        }
       } catch (error) {
         const message = (error as Error)?.message || String(error)
 
@@ -156,20 +137,20 @@ function cleanupCooldownMap(cooldownMap: Map<string, number>, now: number, coold
   }
 }
 
-function isPlatformEnabled(config: Config, platform: 'douyin' | 'xiaohongshu' | 'bilibili' | 'twitter' | 'youtube'): boolean {
+function isPlatformEnabled(config: Config, platform: 'douyin' | 'xiaohongshu' | 'bilibili' | 'twitter'): boolean {
   if (platform === 'douyin') {
-    return config.douyin.enabled
+    return config.platforms.douyin.enabled
   }
   if (platform === 'xiaohongshu') {
-    return config.xiaohongshu.enabled
+    return config.platforms.xiaohongshu.enabled
   }
   if (platform === 'bilibili') {
-    return config.bilibili.enabled
+    return config.platforms.bilibili.enabled
   }
   if (platform === 'twitter') {
-    return config.twitter.enabled
+    return config.platforms.twitter.enabled
   }
-  return config.youtube.enabled
+  return config.platforms.twitter.enabled
 }
 
 function isDisabledParseError(message: string): boolean {

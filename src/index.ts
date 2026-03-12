@@ -2,11 +2,29 @@ import path from 'node:path'
 
 import type { Context } from 'koishi'
 
-import { Config } from './config'
+import { Config, migrateConfig } from './config'
 import type { Config as PluginConfig } from './config'
 import { registerParseCommand } from './command'
 import { registerAutoParseMiddleware } from './middleware'
-import { registerParseUrlTool } from './tools/parse-url-tool'
+
+type FfmpegServiceLike = {
+  executable?: string
+  path?: string
+  ffmpegPath?: string
+  ffprobePath?: string
+  ffprobe?: string
+}
+
+type ConsoleEntryLike = string[] | {
+  dev: string
+  prod: string
+}
+
+type ConsoleCtxLike = Context & {
+  console?: {
+    addEntry?: (entry: ConsoleEntryLike) => void
+  }
+}
 
 export const name = 'social-media-parser'
 
@@ -18,15 +36,13 @@ export const inject = {
 export const usage = `
 ## Social Media Parser
 
-抖音 + 小红书 + 哔哩哔哩 + Twitter(X) + YouTube 五合一解析插件，支持：
+抖音 + 小红书 + 哔哩哔哩 + Twitter(X) 解析插件，支持：
 - 自动解析（guild 黑名单）
 - 手动命令：\`parse <url>\`
-- ChatLuna 工具：\`parse_social_media\`（默认关闭）
 
 ### 依赖项
 
 - 必需：\`http\`（用于 API 请求与媒体下载）
-- 可选：\`chatluna\`（注册 \`parse_social_media\` 工具）
 - 可选：\`chatluna_storage\`（媒体持久化存储，避免 base64 data URI）
 - 可选：\`ffmpeg\`（优先使用 Koishi 提供的 ffmpeg/ffprobe 路径）
 
@@ -36,18 +52,17 @@ export const usage = `
 - 小红书：\`xiaohongshu.com\` / \`xhslink.com\`
 - 哔哩哔哩：\`bilibili.com\` / \`b23.tv\` / \`bili22.cn\` / \`bili23.cn\` / \`bili33.cn\` / \`bili2233.cn\`
 - Twitter/X：\`x.com\` / \`twitter.com\` / \`t.co\` / \`fxtwitter.com\` / \`vxtwitter.com\`
-- YouTube：\`youtube.com\` / \`youtu.be\` / \`m.youtube.com\` / \`music.youtube.com\`
 
-### 自动解析与上下文注入
+### 自动解析
 
-- 自动解析受 \`autoParse.blockedGuilds\` / \`autoParse.blockedUsers\` 黑名单限制。
-- 自动解析命中后会发送媒体到群聊；默认不做 ChatLuna 上下文注入。
-- 默认不主动触发角色回复（仅作为后续对话上下文）。
+- 自动解析受 \`autoParse.blacklist.guilds\` / \`autoParse.blacklist.users\` 黑名单限制。
+- 自动解析命中后直接发送解析结果，不做 ChatLuna 上下文注入。
 
 ### 视频处理策略
 
 - 短视频（<= videoMaxDurationSec）压缩后注入。
 - 长视频（> videoMaxDurationSec）按间隔抽帧注入，并可保留音频。
+- \`media.videoSendMode\` 可切换 storage / base64 / url 三种视频发送策略。
 `
 
 export function apply(ctx: Context, config: PluginConfig): void {
@@ -58,11 +73,17 @@ export function apply(ctx: Context, config: PluginConfig): void {
     return
   }
 
+  const { config: resolvedConfig, usedLegacyKeys } = migrateConfig(config)
+  if (usedLegacyKeys.length > 0) {
+    logger.warn(`检测到旧版配置键，已自动迁移: ${usedLegacyKeys.join(', ')}`)
+  }
+
   const cooldownMap = new Map<string, number>()
 
-  const ffmpegService = (ctx as any).ffmpeg
+  const ffmpegService = (ctx as Context & { ffmpeg?: FfmpegServiceLike }).ffmpeg
   const ffmpegPath = ffmpegService?.executable || ffmpegService?.path || ffmpegService?.ffmpegPath
-  const ffprobePath = ffmpegService?.ffprobePath || ffmpegService?.ffprobe
+  const ffprobePath =
+    ffmpegService?.ffprobePath || ffmpegService?.ffprobe || deriveFfprobePathFromFfmpeg(ffmpegPath)
   if (!process.env.FFMPEG_PATH && typeof ffmpegPath === 'string' && ffmpegPath) {
     process.env.FFMPEG_PATH = ffmpegPath
   }
@@ -70,13 +91,8 @@ export function apply(ctx: Context, config: PluginConfig): void {
     process.env.FFPROBE_PATH = ffprobePath
   }
 
-  registerParseCommand(ctx, config)
-  registerAutoParseMiddleware(ctx, config, cooldownMap)
-
-  ctx.inject(['chatluna'], (innerCtx) => {
-    registerParseUrlTool(innerCtx as any, config)
-  })
-
+  registerParseCommand(ctx, resolvedConfig)
+  registerAutoParseMiddleware(ctx, resolvedConfig, cooldownMap)
   ctx.inject(['console'], (innerCtx) => {
     const packageBase = path.resolve(ctx.baseDir, 'node_modules/koishi-plugin-social-media-parser')
     const entry = process.env.KOISHI_BASE
@@ -88,10 +104,33 @@ export function apply(ctx: Context, config: PluginConfig): void {
             prod: path.resolve(packageBase, 'dist'),
           }
 
-    ;(innerCtx as any).console?.addEntry?.(entry as any)
+    ;(innerCtx as ConsoleCtxLike).console?.addEntry?.(entry)
   })
 
   logger.info('social-media-parser 插件已加载')
+}
+
+function deriveFfprobePathFromFfmpeg(ffmpegPath: unknown): string | null {
+  if (typeof ffmpegPath !== 'string' || !ffmpegPath) {
+    return null
+  }
+
+  if (!ffmpegPath.includes('/')) {
+    if (ffmpegPath === 'ffmpeg') {
+      return 'ffprobe'
+    }
+    return null
+  }
+
+  const dir = path.dirname(ffmpegPath)
+  const ext = path.extname(ffmpegPath)
+  const base = path.basename(ffmpegPath, ext)
+  const probeBase = base.replace(/ffmpeg/i, 'ffprobe')
+  if (probeBase === base) {
+    return null
+  }
+
+  return path.join(dir, `${probeBase}${ext}`)
 }
 
 export { Config }

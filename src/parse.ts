@@ -4,7 +4,6 @@ import type { Config } from './config'
 import { parseBilibili } from './parsers/bilibili'
 import { parseDouyin } from './parsers/douyin'
 import { parseTwitter } from './parsers/twitter'
-import { parseYouTube } from './parsers/youtube'
 import { parseXiaohongshu } from './parsers/xiaohongshu'
 import type { ParsedContent } from './types'
 import { detectPlatformByUrl, normalizeInputUrl } from './utils/url'
@@ -17,43 +16,36 @@ export async function parseSocialUrl(
 ): Promise<ParsedContent> {
   const normalized = normalizeInputUrl(input)
   if (!normalized) {
-    throw new Error('链接无效，或不属于抖音/小红书/B站/Twitter(X)/YouTube 域名。')
+    throw new Error('链接无效，或不属于抖音/小红书/B站/Twitter(X) 域名。')
   }
 
   const platform = detectPlatformByUrl(normalized)
   if (!platform) {
-    throw new Error('当前仅支持抖音、小红书、Bilibili、Twitter(X) 和 YouTube 链接。')
+    throw new Error('当前仅支持抖音、小红书、Bilibili、Twitter(X) 链接。')
   }
 
   if (platform === 'douyin') {
-    if (!config.douyin.enabled) {
+    if (!config.platforms.douyin.enabled) {
       throw new Error('抖音解析已禁用。')
     }
     return parseDouyin(ctx, normalized, config, logger)
   }
 
   if (platform === 'bilibili') {
-    if (!config.bilibili.enabled) {
+    if (!config.platforms.bilibili.enabled) {
       throw new Error('Bilibili 解析已禁用。')
     }
     return parseBilibili(ctx, normalized, config, logger)
   }
 
   if (platform === 'twitter') {
-    if (!config.twitter.enabled) {
+    if (!config.platforms.twitter.enabled) {
       throw new Error('Twitter/X 解析已禁用。')
     }
     return parseTwitter(ctx, normalized, config, logger)
   }
 
-  if (platform === 'youtube') {
-    if (!config.youtube.enabled) {
-      throw new Error('YouTube 解析已禁用。')
-    }
-    return parseYouTube(ctx, normalized, config, logger)
-  }
-
-  if (!config.xiaohongshu.enabled) {
+  if (!config.platforms.xiaohongshu.enabled) {
     throw new Error('小红书解析已禁用。')
   }
 

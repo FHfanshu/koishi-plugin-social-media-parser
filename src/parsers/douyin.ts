@@ -29,64 +29,37 @@ export async function parseDouyin(
   config: Config,
   logger: Logger
 ): Promise<ParsedContent> {
-  const apiBaseUrl = normalizeApiBaseUrl(config.douyin.apiBaseUrl || 'https://api.douyin.wtf')
-  const timeoutMs = Math.max(30_000, config.timeoutMs)
-  const payloadSources: Array<{ source: 'hybrid' | 'rapidapi'; payload: any }> = []
-  let lastError: Error | null = null
+  const apiBaseUrl = normalizeApiBaseUrl(config.platforms.douyin.api.baseUrl || 'https://api.douyin.wtf')
+  const timeoutMs = Math.max(30_000, config.network.timeoutMs)
+  let hybridPayload: any
 
   try {
-    const hybridPayload = await fetchHybridPayload(
+    hybridPayload = await fetchHybridPayload(
       ctx,
       apiBaseUrl,
-      config.douyin.fallbackApiBaseUrls,
+      config.platforms.douyin.api.fallbackUrls,
       inputUrl,
       timeoutMs,
       logger,
       config.debug
     )
-    payloadSources.push({ source: 'hybrid', payload: hybridPayload })
   } catch (error) {
-    lastError = error instanceof Error ? error : new Error(String(error))
+    const lastError = error instanceof Error ? error : new Error(String(error))
     if (config.debug) {
       logger.info(`douyin hybrid chain failed: ${lastError.message}`)
     }
+    throw lastError
   }
 
   try {
-    const rapidPayload = await fetchRapidApiPayload(
-      ctx,
-      config,
-      inputUrl,
-      timeoutMs,
-      logger,
-      config.debug
-    )
-    if (rapidPayload) {
-      payloadSources.push({ source: 'rapidapi', payload: rapidPayload })
-    }
+    return parseDouyinPayload(hybridPayload, inputUrl, config, logger)
   } catch (error) {
-    lastError = error instanceof Error ? error : new Error(String(error))
+    const lastError = error instanceof Error ? error : new Error(String(error))
     if (config.debug) {
-      logger.info(`douyin rapidapi chain failed: ${lastError.message}`)
+      logger.info(`douyin payload rejected from hybrid: ${lastError.message}`)
     }
+    throw lastError
   }
-
-  for (const item of payloadSources) {
-    try {
-      const parsed = parseDouyinPayload(item.payload, inputUrl, config, logger)
-      if (config.debug && item.source === 'rapidapi') {
-        logger.info('douyin parsed via rapidapi fallback')
-      }
-      return parsed
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error))
-      if (config.debug) {
-        logger.info(`douyin payload rejected from ${item.source}: ${lastError.message}`)
-      }
-    }
-  }
-
-  throw lastError || new Error('抖音解析失败：无可用数据源')
 }
 
 function parseDouyinPayload(payload: any, inputUrl: string, config: Config, logger: Logger): ParsedContent {
@@ -201,71 +174,6 @@ async function fetchHybridPayload(
   throw lastError || new Error('抖音解析请求失败')
 }
 
-async function fetchRapidApiPayload(
-  ctx: Context,
-  config: Config,
-  inputUrl: string,
-  timeoutMs: number,
-  logger: Logger,
-  debugEnabled: boolean
-): Promise<any | null> {
-  const key = (config.douyin.rapidApiKey || '').trim()
-  const host = (config.douyin.rapidApiHost || '').trim()
-  if (!key || !host) {
-    if (debugEnabled && (key || host)) {
-      logger.info('douyin rapidapi skipped: both rapidApiKey and rapidApiHost are required')
-    }
-    return null
-  }
-
-  const endpointPath = normalizeEndpointPath(config.douyin.rapidApiEndpointPath || '/api/hybrid/video_data')
-  const urlParamKey = normalizeQueryKey(config.douyin.rapidApiUrlParamKey || 'url')
-
-  const candidates = [inputUrl]
-  try {
-    const resolved = await resolveRedirect(ctx, inputUrl, Math.min(timeoutMs, 20_000), logger)
-    if (resolved && resolved !== inputUrl) {
-      candidates.push(resolved)
-    }
-  } catch {}
-
-  let lastError: Error | null = null
-  for (let index = 0; index < candidates.length; index += 1) {
-    const currentUrl = candidates[index]
-    const endpoint = `https://${host}${endpointPath}?${urlParamKey}=${encodeURIComponent(currentUrl)}`
-    try {
-      const text = await requestText(ctx, endpoint, timeoutMs, {
-        accept: 'application/json,text/plain,*/*',
-        'X-RapidAPI-Key': key,
-        'X-RapidAPI-Host': host,
-      })
-      if (!text || typeof text !== 'string') {
-        lastError = new Error('rapidapi empty response')
-        continue
-      }
-
-      const payload = JSON.parse(text)
-      if (toNumber(payload?.code) >= 400) {
-        lastError = new Error(extractRemoteError(payload) || `code=${payload?.code}`)
-        continue
-      }
-
-      return payload
-    } catch (error) {
-      const message = (error as Error)?.message || String(error)
-      lastError = error instanceof Error ? error : new Error(message)
-      if (debugEnabled) {
-        logger.info(`douyin rapidapi request failed: ${message}; endpoint=${endpoint}`)
-      }
-    }
-  }
-
-  if (lastError) {
-    throw lastError
-  }
-  return null
-}
-
 function pickMediaFromHybrid(root: any, inputUrl: string, config: Config, logger: Logger): DouyinMedia {
   const nodes = collectMediaNodes(root)
   let imageFallback: DouyinImageMedia | null = null
@@ -285,7 +193,7 @@ function pickMediaFromHybrid(root: any, inputUrl: string, config: Config, logger
     }
 
     if (!imageFallback) {
-      const images = extractImageUrls(node, config.douyin.maxImages)
+      const images = extractImageUrls(node, config.platforms.douyin.maxImages)
       if (images.length > 0) {
         imageFallback = {
           kind: 'images',
@@ -674,20 +582,6 @@ function isLikelyVideoResourceUrl(url: string): boolean {
   }
 
   return false
-}
-
-function normalizeEndpointPath(input: string): string {
-  const trimmed = input.trim()
-  if (!trimmed) {
-    return '/api/hybrid/video_data'
-  }
-
-  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
-}
-
-function normalizeQueryKey(input: string): string {
-  const trimmed = input.trim()
-  return trimmed || 'url'
 }
 
 function pickString(...values: unknown[]): string {
