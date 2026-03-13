@@ -39,7 +39,8 @@
   },
   "dependencies": {
     "@langchain/core": "^0.3.26",
-    "cheerio": "1.0.0-rc.12"
+    "cheerio": "1.0.0-rc.12",
+    "js-yaml": "^4.1.0"
   },
   "devDependencies": {
     "@koishijs/client": "^5.30.4",
