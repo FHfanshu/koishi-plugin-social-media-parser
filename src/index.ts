@@ -65,6 +65,10 @@ export const usage = `
 - 短视频（<= videoMaxDurationSec）压缩后注入。
 - 长视频（> videoMaxDurationSec）按间隔抽帧注入，并可保留音频。
 - \`media.videoSendMode\` 可切换 storage / base64 / url 三种视频发送策略。
+
+### 注意事项
+
+- NapCat 等 OneBot 协议端在发送合并转发消息时可能出现超时，导致消息发送失败。若频繁遇到此问题，可尝试关闭 \`forward.autoMergeForward\` 或调低 \`forward.maxForwardNodes\`。
 `
 
 export function apply(ctx: Context, config: PluginConfig): void {
