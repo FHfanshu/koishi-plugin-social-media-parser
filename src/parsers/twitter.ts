@@ -122,6 +122,15 @@ export async function parseTwitter(
     translationProvider,
     originalUrl: inputUrl,
     resolvedUrl: canonicalUrl,
+    extra: {
+      tweetId,
+      providers: {
+        text: textResolved.provider,
+        image: imagesResolved.provider,
+        video: videosResolved.provider,
+        translation: translationProvider,
+      },
+    },
   }
 }
 
@@ -367,7 +376,7 @@ async function fetchGrokExtract(
 
   const grokAccess = await resolveGrokAccess(ctx, config, logger)
   if (!grokAccess) {
-    logger.debug('twitter grok skipped: endpoint/apiKey/model missing')
+    logger.info('twitter grok skipped: endpoint/apiKey/model missing')
     return null
   }
 
@@ -554,14 +563,14 @@ async function resolveGrokAccessFromChatLuna(
   try {
     plugin = chatluna.getPlugin(platform)
   } catch {
-    logger.debug(`twitter grok resolve platform failed: ${platform}`)
+    logger.info(`twitter grok resolve platform failed: ${platform}`)
     return null
   }
 
   const config = isRecord(plugin) ? plugin.config : null
   const resolved = resolveEndpointAndApiKeyFromConfig(config)
   if (!resolved) {
-    logger.debug(`twitter grok platform config missing endpoint/apiKey: ${platform}`)
+    logger.info(`twitter grok platform config missing endpoint/apiKey: ${platform}`)
     return null
   }
 

@@ -27,6 +27,8 @@ export async function resolveRedirect(
 ): Promise<string> {
   let current = url
   for (let i = 0; i < 6; i += 1) {
+    await assertSafeExternalUrl(ctx, current, false)
+
     const response = await (ctx as any).http(current, {
       method: 'GET',
       timeout: timeoutMs,
@@ -42,15 +44,20 @@ export async function resolveRedirect(
     const location = response.headers?.get?.('location')
 
     if (status >= 300 && status < 400 && location) {
+      let next = location
       try {
-        current = new URL(location, response.url || current).toString()
+        next = new URL(location, response.url || current).toString()
       } catch {
-        current = location
+        next = location
       }
+
+      await assertSafeExternalUrl(ctx, next, false)
+      current = next
       continue
     }
 
     if (typeof response.url === 'string' && response.url) {
+      await assertSafeExternalUrl(ctx, response.url, false)
       current = response.url
     }
     break
@@ -126,14 +133,33 @@ export async function requestText(
   timeoutMs: number,
   headers?: Record<string, string>
 ): Promise<string> {
-  return ctx.http.get(url, {
+  await assertSafeExternalUrl(ctx, url, false)
+
+  const response = await (ctx as any).http(url, {
+    method: 'GET',
     timeout: timeoutMs,
     responseType: 'text',
+    redirect: 'follow',
+    validateStatus: (status: number) => status >= 200 && status < 400,
     headers: {
       'user-agent': DEFAULT_UA,
       ...headers,
     },
-  } as any)
+  })
+
+  const finalUrl = typeof response?.url === 'string' && response.url ? response.url : url
+  await assertSafeExternalUrl(ctx, finalUrl, false)
+
+  const data = response?.data
+  if (typeof data === 'string') {
+    return data
+  }
+
+  if (Buffer.isBuffer(data)) {
+    return data.toString('utf8')
+  }
+
+  return typeof data === 'undefined' || data === null ? '' : String(data)
 }
 
 export function guessMimeFromUrl(url: string): string {

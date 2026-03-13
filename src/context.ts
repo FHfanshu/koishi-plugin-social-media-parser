@@ -120,7 +120,7 @@ async function buildMediaInjectionMessage(
       }
 
       if (!canAppendBinary(compressed.buffer.length, totalBytes, mediaConfig.maxTotalBytes)) {
-        logger.debug('skip image injection by maxTotalBytes')
+        logger.info('skip image injection by maxTotalBytes')
         skipReasons.push('image exceeds maxTotalBytes budget')
         break
       }
@@ -135,7 +135,7 @@ async function buildMediaInjectionMessage(
         },
       })
     } catch (error) {
-      logger.debug(`inject image failed: ${String((error as Error)?.message || error)}`)
+      logger.info(`inject image failed: ${String((error as Error)?.message || error)}`)
       skipReasons.push('image download/process failed')
     }
   }
@@ -261,7 +261,7 @@ async function buildMediaInjectionMessage(
         }
       }
     } catch (error) {
-      logger.debug(`inject video failed: ${String((error as Error)?.message || error)}`)
+      logger.info(`inject video failed: ${String((error as Error)?.message || error)}`)
       if ((parsed.platform === 'bilibili' || parsed.platform === 'douyin' || parsed.platform === 'xiaohongshu') && isSafePublicHttpUrl(videoUrl)) {
         injectedVideo = true
         parts.push({

@@ -24,11 +24,12 @@ export async function toMediaUrl(
     const filename = `smp_${hint}_${storageSeq}.${ext}`
     const file = await storage.createTempFile(buffer, filename)
     if (file?.url) {
-      logger.debug(`storage: ${hint} -> ${file.url} (${buffer.length} bytes)`)
+      // Include sequence number in log to help identify duplicate calls
+      logger.info(`storage: ${hint} #${storageSeq} -> ${file.url} (${buffer.length} bytes)`)
       return file.url
     }
   } catch (error: any) {
-    logger.debug(`storage fallback to base64: ${hint}: ${error?.message || error}`)
+    logger.info(`storage fallback to base64: ${hint}: ${error?.message || error}`)
   }
 
   return toDataUri(mimeType, buffer)

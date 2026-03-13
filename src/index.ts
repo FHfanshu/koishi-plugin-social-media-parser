@@ -6,6 +6,7 @@ import { Config, migrateConfig } from './config'
 import type { Config as PluginConfig } from './config'
 import { registerParseCommand } from './command'
 import { registerAutoParseMiddleware } from './middleware'
+import { setFfmpegPaths } from './utils/compress'
 
 type FfmpegServiceLike = {
   executable?: string
@@ -75,9 +76,6 @@ export function apply(ctx: Context, config: PluginConfig): void {
   }
 
   const { config: resolvedConfig, usedLegacyKeys } = migrateConfig(config)
-  if (resolvedConfig.debug) {
-    promoteDebugLogsToInfo(logger)
-  }
 
   if (usedLegacyKeys.length > 0) {
     logger.warn(`检测到旧版配置键，已自动迁移: ${usedLegacyKeys.join(', ')}`)
@@ -85,16 +83,13 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   const cooldownMap = new Map<string, number>()
 
+  // Get ffmpeg paths from Koishi ffmpeg service and configure compress module
+  // This avoids polluting process.env which can affect other plugins in the same process
   const ffmpegService = (ctx as Context & { ffmpeg?: FfmpegServiceLike }).ffmpeg
-  const ffmpegPath = ffmpegService?.executable || ffmpegService?.path || ffmpegService?.ffmpegPath
+  const ffmpegPath = ffmpegService?.executable || ffmpegService?.path || ffmpegService?.ffmpegPath || null
   const ffprobePath =
-    ffmpegService?.ffprobePath || ffmpegService?.ffprobe || deriveFfprobePathFromFfmpeg(ffmpegPath)
-  if (!process.env.FFMPEG_PATH && typeof ffmpegPath === 'string' && ffmpegPath) {
-    process.env.FFMPEG_PATH = ffmpegPath
-  }
-  if (!process.env.FFPROBE_PATH && typeof ffprobePath === 'string' && ffprobePath) {
-    process.env.FFPROBE_PATH = ffprobePath
-  }
+    ffmpegService?.ffprobePath || ffmpegService?.ffprobe || deriveFfprobePathFromFfmpeg(ffmpegPath) || null
+  setFfmpegPaths(ffmpegPath, ffprobePath)
 
   registerParseCommand(ctx, resolvedConfig)
   registerAutoParseMiddleware(ctx, resolvedConfig, cooldownMap)
@@ -113,16 +108,6 @@ export function apply(ctx: Context, config: PluginConfig): void {
   })
 
   logger.info('social-media-parser 插件已加载')
-}
-
-function promoteDebugLogsToInfo(logger: Logger): void {
-  const patchedLogger = logger as Logger & { __debugPromotedToInfo?: boolean }
-  if (patchedLogger.__debugPromotedToInfo) {
-    return
-  }
-
-  patchedLogger.__debugPromotedToInfo = true
-  logger.debug = logger.info.bind(logger) as Logger['debug']
 }
 
 function deriveFfprobePathFromFfmpeg(ffmpegPath: unknown): string | null {

@@ -15,6 +15,7 @@ export interface ParsedContent {
   images: string[]
   imageFallbackUrls?: string[]
   videos: string[]
+  audios?: string[]
   textProvider?: TwitterProvider
   imageProvider?: TwitterProvider
   videoProvider?: TwitterProvider
@@ -23,6 +24,7 @@ export interface ParsedContent {
   musicUrl?: string
   originalUrl: string
   resolvedUrl?: string
+  extra?: Record<string, unknown>
 }
 
 export interface CompressedBinary {

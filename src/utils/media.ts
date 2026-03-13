@@ -22,7 +22,6 @@ export async function sendParsedContent(
   const platformName = getPlatformName(parsed.platform)
   const intro = buildIntroText(platformName, parsed, sourceUrl, config)
   const imageUrls = resolveImageUrlsForSend(parsed, config)
-  const forceTextOnlyForwardForImages = isOneBot && parsed.platform === 'xiaohongshu'
 
   const shouldAutoForward =
     isOneBot
@@ -51,12 +50,10 @@ export async function sendParsedContent(
         ? await buildImageSegments(ctx, imageUrls, config, logger)
         : []
       const shouldForwardVideo = isOneBot && config.forward.enabled
-      const forwardImageSegments = forceTextOnlyForwardForImages ? [] : imageSegments
 
       if (shouldForwardVideo) {
-        const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, forwardImageSegments, config, logger)
-        const shouldSendImagesPlain = forceTextOnlyForwardForImages || forwardMode !== 'full'
-        if (shouldSendImagesPlain) {
+        const forwardResult = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
+        if (forwardResult !== 'full') {
           await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
         } else {
           await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
@@ -75,12 +72,11 @@ export async function sendParsedContent(
   if (imageUrls.length > 0) {
     const imageSegments = await buildImageSegments(ctx, imageUrls, config, logger)
     const shouldForwardImages = isOneBot && config.forward.enabled
-    const forwardImageSegments = forceTextOnlyForwardForImages ? [] : imageSegments
 
     if (shouldForwardImages) {
-      const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, forwardImageSegments, config, logger)
-      const shouldSendImagesPlain = forceTextOnlyForwardForImages || forwardMode !== 'full'
-      if (shouldSendImagesPlain) {
+      const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
+      // Only send music, remaining images are truncated to avoid timeout
+      if (forwardMode !== 'full') {
         await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
       } else {
         await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
@@ -178,7 +174,7 @@ async function buildVideoElement(
 
     return buildConfiguredVideoElement(ctx, downloaded, config, logger, videoSendMode, hasStorage, isOneBot)
   } catch (error) {
-    logger.debug(`video build failed: ${String((error as Error)?.message || error)}`)
+    logger.info(`video build failed: ${String((error as Error)?.message || error)}`)
     if (!config.media.fallbackToUrlOnError) {
       throw error
     }
@@ -356,14 +352,14 @@ async function optimizeVideoBeforeSend(
       return null
     }
 
-    logger.debug(`video optimized before send: ${buffer.length} -> ${processed.video.buffer.length}`)
+    logger.info(`video optimized before send: ${buffer.length} -> ${processed.video.buffer.length}`)
 
     return {
       buffer: processed.video.buffer,
       mimeType: processed.video.mimeType || 'video/mp4',
     }
   } catch (error) {
-    logger.debug(`video optimize skipped: ${String((error as Error)?.message || error)}`)
+    logger.info(`video optimize skipped: ${String((error as Error)?.message || error)}`)
     return null
   }
 }
@@ -374,21 +370,68 @@ async function buildImageSegments(
   config: Config,
   logger: Logger,
 ): Promise<any[]> {
-  const imageSegments = [] as any[]
-  for (const url of urls) {
-    if (!isSafePublicHttpUrl(url)) {
-      logger.warn(`image send skipped by url safety policy: ${url}`)
-      continue
-    }
+  // Dedupe URLs first to avoid processing the same image multiple times
+  const uniqueUrls = dedupeUrls(urls)
 
-    // Global image send strategy:
-    // 1) direct url first
-    // 2) if sending fails: download -> storage url
-    // 3) fallback: download -> base64
-    imageSegments.push(segment.image(url))
+  if (uniqueUrls.length !== urls.length) {
+    logger.info(`buildImageSegments: deduped ${urls.length} -> ${uniqueUrls.length} URLs`)
   }
 
-  return imageSegments
+  if (config.debug && uniqueUrls.length > 0) {
+    logger.info(`buildImageSegments: processing ${uniqueUrls.length} unique URLs`)
+  }
+
+  const imageSendMode = config.media.sendMode
+
+  // Download images in parallel and convert to configured send mode.
+  const results = await Promise.all(uniqueUrls.map(async (url, index) => {
+    // Normalize protocol-relative URLs
+    const normalizedUrl = url.startsWith('//') ? `https:${url}` : url
+
+    if (!isSafePublicHttpUrl(normalizedUrl)) {
+      logger.warn(`image send skipped by url safety policy: ${url}`)
+      return null
+    }
+
+    if (imageSendMode === 'url') {
+      return segment.image(normalizedUrl)
+    }
+
+    // Check if this is a protected CDN URL that won't work as direct URL for OneBot
+    const isProtectedCdn = isXiaohongshuCdnUrl(normalizedUrl)
+
+    // Download image and convert to base64/storage URL
+    try {
+      const downloaded = await downloadImageForSend(ctx, normalizedUrl, config)
+      const mimeType = downloaded.mimeType || 'image/jpeg'
+      if (imageSendMode === 'base64') {
+        return segment.image(toDataUri(mimeType, downloaded.buffer))
+      }
+
+      const storedUrl = await toMediaUrl(ctx, mimeType, downloaded.buffer, 'send_img', logger)
+      if (isHttpMediaUrl(storedUrl) && storedUrl !== normalizedUrl) {
+        return segment.image(storedUrl)
+      }
+      return segment.image(toDataUri(mimeType, downloaded.buffer))
+    } catch (error) {
+      // For protected CDNs, skip the image instead of falling back to direct URL
+      // because OneBot backend also can't download these protected URLs
+      if (isProtectedCdn) {
+        logger.warn(`image download failed on protected CDN, skipping: ${normalizedUrl}`)
+        return null
+      }
+
+      if (config.media.fallbackToUrlOnError) {
+        logger.info(`image download failed, fallback to direct URL: ${String((error as Error)?.message || error)}`)
+        return segment.image(normalizedUrl)
+      }
+
+      logger.warn(`image download failed and url fallback disabled: ${String((error as Error)?.message || error)}`)
+      return null
+    }
+  }))
+
+  return results.filter((seg): seg is any => seg !== null)
 }
 
 async function downloadImageForSend(
@@ -463,84 +506,127 @@ async function sendForwardNodes(
   }
 
   const safeNodes = nodes.slice(0, config.forward.maxForwardNodes)
-  const primaryNodes = safeNodes
 
-  if (await trySendForward(session, primaryNodes, logger, 'primary')) {
-    return true
-  }
-
-  await sleep(600)
-  const retryNodes = session.platform === 'onebot'
-    ? await rewriteForwardNodesForRetry(ctx, safeNodes, config, logger)
-    : safeNodes
-  return trySendForward(session, retryNodes, logger, 'retry')
-}
-
-async function trySendForward(
-  session: Session,
-  nodes: any[],
-  logger: Logger,
-  label: string
-): Promise<boolean> {
+  // Try OneBot API first if available
   if (session.platform === 'onebot') {
-    const forwarded = await trySendForwardViaOneBotApi(session, nodes, logger, label)
-    if (forwarded) {
+    // Use a shorter timeout to avoid waiting 60s for NapCat resource upload
+    // If NapCat takes too long to download/upload images, we should fallback
+    // to plain message sending instead of blocking the user experience
+    const forwardTimeoutMs = 15_000
+    const forwardResult = await trySendForwardViaOneBotApiWithTimeout(
+      session, safeNodes, logger, 'onebot-api', forwardTimeoutMs
+    )
+    if (forwardResult === 'sent') {
       return true
     }
+
+    if (forwardResult === 'timeout') {
+      // Treat timeout as potentially already sent to avoid duplicate forward messages.
+      return true
+    }
+
+    // OneBot API failed with non-timeout error, fall through to koishi forward
   }
 
+  // Fallback to koishi native forward
   try {
-    await session.send(h('message', { forward: true }, nodes))
+    await session.send(h('message', { forward: true }, safeNodes))
     return true
   } catch (error) {
-    logger.debug(`forward send failed (${label}): ${String((error as Error)?.message || error)}`)
+    logger.info(`forward send failed (koishi-native): ${String((error as Error)?.message || error)}`)
     return false
   }
 }
 
-async function trySendForwardViaOneBotApi(
+type OneBotForwardResult = 'sent' | 'timeout' | 'failed'
+
+async function trySendForwardViaOneBotApiWithTimeout(
   session: Session,
   nodes: any[],
   logger: Logger,
-  label: string
-): Promise<boolean> {
+  label: string,
+  timeoutMs: number
+): Promise<OneBotForwardResult> {
   const onebotNodes = toOneBotForwardNodes(nodes, session)
   if (!onebotNodes.length) {
-    return false
+    return 'failed'
   }
 
   const target = resolveOneBotForwardTarget(session)
   if (!target) {
-    logger.debug(`forward onebot api skipped (${label}): missing target`)
-    return false
+    logger.info(`forward onebot api skipped (${label}): missing target`)
+    return 'failed'
   }
 
   const internal = (session as any).bot?.internal
   if (!internal) {
-    logger.debug(`forward onebot api skipped (${label}): missing internal api`)
-    return false
+    logger.info(`forward onebot api skipped (${label}): missing internal api`)
+    return 'failed'
   }
+
+  // Create a promise that rejects after timeout
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      reject(new Error(`forward api timeout after ${timeoutMs}ms`))
+    }, timeoutMs)
+  })
 
   try {
-    if (target.type === 'group') {
-      await callOneBotApi(internal, 'send_group_forward_msg', {
-        group_id: target.id,
-        message_seq: 0,
-        messages: onebotNodes,
-      })
-    } else {
-      await callOneBotApi(internal, 'send_private_forward_msg', {
-        user_id: target.id,
-        message_seq: 0,
-        messages: onebotNodes,
-      })
+    // Race between the API call and timeout
+    await Promise.race([
+      sendForwardMessageViaApi(internal, target, onebotNodes),
+      timeoutPromise
+    ])
+    return 'sent'
+  } catch (error) {
+    const errorMsg = String((error as Error)?.message || error)
+
+    // Check if this is our own timeout or a network timeout
+    if (errorMsg.includes('forward api timeout') || isTimeoutError(errorMsg)) {
+      logger.warn(`forward onebot api timeout (${label}): treat as uncertain sent and skip fallback. Error: ${errorMsg}`)
+      return 'timeout'
     }
 
-    return true
-  } catch (error) {
-    logger.debug(`forward onebot api failed (${label}): ${String((error as Error)?.message || error)}`)
-    return false
+    logger.info(`forward onebot api failed (${label}): ${errorMsg}`)
+    return 'failed'
   }
+}
+
+async function sendForwardMessageViaApi(
+  internal: any,
+  target: { type: 'group' | 'private', id: string },
+  onebotNodes: any[]
+): Promise<void> {
+  if (target.type === 'group') {
+    await callOneBotApi(internal, 'send_group_forward_msg', {
+      group_id: target.id,
+      message_seq: 0,
+      messages: onebotNodes,
+    })
+  } else {
+    await callOneBotApi(internal, 'send_private_forward_msg', {
+      user_id: target.id,
+      message_seq: 0,
+      messages: onebotNodes,
+    })
+  }
+}
+
+/**
+ * Check if an error message indicates a timeout.
+ * Timeout errors are special because the message may have already been sent
+ * before the error was thrown (e.g., NapCat Highway upload timeout).
+ */
+function isTimeoutError(message: string): boolean {
+  const lower = message.toLowerCase()
+  return (
+    lower.includes('etimedout') ||
+    lower.includes('timeout') ||
+    lower.includes('timed out') ||
+    lower.includes('econnreset') ||
+    lower.includes('socket hang up') ||
+    lower.includes('upload failed')
+  )
 }
 
 async function callOneBotApi(
@@ -693,90 +779,6 @@ function normalizeOneBotImageFile(attrs: Record<string, unknown>): string {
   return source
 }
 
-async function rewriteForwardNodesForRetry(
-  ctx: Context,
-  nodes: any[],
-  config: Config,
-  logger: Logger
-): Promise<any[]> {
-  return Promise.all(nodes.map((node) => rewriteForwardNodeElement(ctx, node, config, logger)))
-}
-
-async function rewriteForwardNodeElement(
-  ctx: Context,
-  element: any,
-  config: Config,
-  logger: Logger
-): Promise<any> {
-  if (!element || typeof element !== 'object') {
-    return element
-  }
-
-  const attrs = element.attrs && typeof element.attrs === 'object'
-    ? { ...element.attrs }
-    : element.attrs
-
-  const remoteImageUrl = (
-    attrs &&
-    (element.type === 'img' || element.type === 'image') &&
-    resolveForwardImageUrl(attrs)
-  )
-
-  if (remoteImageUrl) {
-    const inlined = await inlineForwardImage(ctx, remoteImageUrl, config, logger)
-    if (inlined) {
-      if (typeof attrs.src === 'string') attrs.src = inlined
-      if (typeof attrs.url === 'string') attrs.url = inlined
-      if (typeof attrs.file === 'string') attrs.file = inlined
-    }
-  }
-
-  const children = Array.isArray(element.children)
-    ? await Promise.all(element.children.map((child: any) => rewriteForwardNodeElement(ctx, child, config, logger)))
-    : element.children
-
-  return {
-    ...element,
-    attrs,
-    children,
-  }
-}
-
-function resolveForwardImageUrl(attrs: Record<string, any>): string {
-  for (const key of ['src', 'url', 'file']) {
-    const value = attrs[key]
-    if (typeof value === 'string' && value.startsWith('http')) {
-      return value
-    }
-  }
-
-  return ''
-}
-
-async function inlineForwardImage(
-  ctx: Context,
-  url: string,
-  config: Config,
-  logger: Logger
-): Promise<string | null> {
-  try {
-    const downloaded = await downloadImageForSend(ctx, url, config)
-    const mimeType = downloaded.mimeType || 'image/jpeg'
-    const storedUrl = await toMediaUrl(ctx, mimeType, downloaded.buffer, 'forward_img', logger)
-    if (isHttpMediaUrl(storedUrl) && storedUrl !== url) {
-      return storedUrl
-    }
-    return toDataUri(mimeType, downloaded.buffer)
-  } catch (error) {
-    logger.debug(`forward image fallback pipeline skipped: ${String((error as Error)?.message || error)}`)
-    return null
-  }
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 async function sendImagesPlain(
   ctx: Context,
   session: Session,
@@ -816,6 +818,7 @@ async function sendForwardContentOrPlain(
   logger: Logger
 ): Promise<ForwardContentMode> {
   const contentNodes = createForwardContentNodes(intro, imageSegments, session, config)
+
   if (contentNodes.length && await sendForwardNodes(ctx, session, contentNodes, config, logger)) {
     return 'full'
   }
@@ -1019,6 +1022,15 @@ function isTwitterMediaUrl(url: string): boolean {
   }
 }
 
+function isXiaohongshuCdnUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return host.endsWith('.xhscdn.com')
+  } catch {
+    return false
+  }
+}
+
 function createForwardTextNodes(text: string, session: Session, config: Config): any[] {
   const chunks = splitTextChunks(text, config.forward.textChunkSize)
   const limited = chunks.slice(0, Math.max(1, config.forward.maxForwardNodes))
@@ -1032,8 +1044,27 @@ function createForwardContentNodes(text: string, imageSegments: any[], session: 
     return nodes
   }
 
-  const imageNodes = imageSegments
-    .slice(0, remaining)
+  // Limit images in forward message to avoid OneBot timeout
+  const maxImages = Math.min(config.forward.maxForwardImages, remaining)
+
+  // Dedupe image segments by their source URL to avoid duplicate images in forward nodes
+  const seenImageSources = new Set<string>()
+  const dedupedImageSegments: any[] = []
+  for (const seg of imageSegments) {
+    const source = resolveImageSegmentSource(seg)
+    if (source && seenImageSources.has(source)) {
+      continue
+    }
+    if (source) {
+      seenImageSources.add(source)
+    }
+    dedupedImageSegments.push(seg)
+    if (dedupedImageSegments.length >= maxImages) {
+      break
+    }
+  }
+
+  const imageNodes = dedupedImageSegments
     .map((image) => h('message', { nickname: config.forward.nickname, userId: session.selfId }, image))
 
   return [...nodes, ...imageNodes]

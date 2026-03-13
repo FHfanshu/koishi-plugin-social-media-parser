@@ -55,6 +55,7 @@ export interface XiaohongshuConfig {
 export interface BilibiliConfig {
   enabled: boolean
   fetchVideo: boolean
+  videoQuality: 480 | 720
   maxDescLength: number
   autoParseBlockedGuilds: string[]
 }
@@ -98,6 +99,7 @@ export interface ForwardConfig {
   autoMergeForward: boolean
   longTextThreshold: number
   imageMergeThreshold: number
+  maxForwardImages: number
   textChunkSize: number
   maxForwardNodes: number
 }
@@ -179,7 +181,11 @@ export const Config: Schema<Config> = Schema.intersect([
       }).description('小红书解析设置'),
       bilibili: Schema.object({
         enabled: Schema.boolean().default(true).description('启用 Bilibili 解析'),
-        fetchVideo: Schema.boolean().default(true).description('尝试获取视频直链（第三方 API，可能不稳定）'),
+        fetchVideo: Schema.boolean().default(true).description('尝试获取视频直链'),
+        videoQuality: Schema.union([
+          Schema.const(480).description('480P'),
+          Schema.const(720).description('720P（推荐）'),
+        ]).default(720).description('视频画质'),
         maxDescLength: Schema.number().default(100).min(20).max(500).description('视频简介最大字符数'),
         autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（仅 Bilibili，支持 platform:guildId）'),
       }).description('Bilibili 解析设置'),
@@ -224,6 +230,7 @@ export const Config: Schema<Config> = Schema.intersect([
       autoMergeForward: Schema.boolean().default(true).description('长文本/多图自动合并转发，减少刷屏'),
       longTextThreshold: Schema.number().default(260).min(80).max(2_000).description('触发自动合并转发的文本长度阈值'),
       imageMergeThreshold: Schema.number().default(2).min(1).max(20).description('触发自动合并转发的图片数量阈值'),
+      maxForwardImages: Schema.number().default(4).min(1).max(10).description('合并转发中最多图片数量（超出部分用普通消息发送，避免 OneBot 超时）'),
       textChunkSize: Schema.number().default(280).min(80).max(1_000).description('合并转发模式下文本分片长度'),
       maxForwardNodes: Schema.number().default(25).min(5).max(80).description('单次合并转发最多节点数'),
     }).description('转发消息设置'),

@@ -67,7 +67,7 @@ export async function compressImageForContext(
       ext: '.jpg',
     }
   } catch (error) {
-    logger.debug(`image compress fallback: ${String((error as Error)?.message || error)}`)
+    logger.info(`image compress fallback: ${String((error as Error)?.message || error)}`)
     return {
       buffer: input,
       mimeType,
@@ -98,7 +98,7 @@ export async function processVideoForContext(
 
     const durationSec = await readVideoDuration(ffprobe, inputPath, config.ffmpegTimeoutMs)
     if (durationSec == null) {
-      logger.debug('video duration probe failed, skip video processing')
+      logger.info('video duration probe failed, skip video processing')
       return null
     }
 
@@ -274,7 +274,7 @@ async function extractVideoAudio(
         config.ffmpegTimeoutMs
       )
     } catch (error) {
-      logger.debug(`audio extract failed: ${String((error as Error)?.message || error)}`)
+      logger.info(`audio extract failed: ${String((error as Error)?.message || error)}`)
       return undefined
     }
   }
@@ -364,7 +364,25 @@ function mapImageQualityToQscale(quality: number): number {
   return Math.max(2, Math.min(31, mapped))
 }
 
+// Module-level paths set by the plugin (avoids polluting process.env)
+let configuredFfmpegPath: string | null = null
+let configuredFfprobePath: string | null = null
+
+/**
+ * Set ffmpeg/ffprobe paths from Koishi ffmpeg service.
+ * This avoids modifying process.env which can affect other plugins.
+ */
+export function setFfmpegPaths(ffmpegPath: string | null, ffprobePath: string | null): void {
+  configuredFfmpegPath = ffmpegPath
+  configuredFfprobePath = ffprobePath
+}
+
 async function resolveFfmpegBinary(): Promise<string | null> {
+  // Prefer configured path from Koishi ffmpeg service
+  if (configuredFfmpegPath && await canAccessBinary(configuredFfmpegPath)) {
+    return configuredFfmpegPath
+  }
+
   const byEnv = process.env.FFMPEG_PATH
   if (byEnv && await canAccessBinary(byEnv)) {
     return byEnv
@@ -387,9 +405,19 @@ async function resolveFfmpegBinary(): Promise<string | null> {
 }
 
 async function resolveFfprobeBinary(): Promise<string | null> {
+  // Prefer configured path from Koishi ffmpeg service
+  if (configuredFfprobePath && await canAccessBinary(configuredFfprobePath)) {
+    return configuredFfprobePath
+  }
+
   const byEnv = process.env.FFPROBE_PATH
   if (byEnv && await canAccessBinary(byEnv)) {
     return byEnv
+  }
+
+  const derivedFromConfigured = deriveFfprobePathFromFfmpeg(configuredFfmpegPath)
+  if (derivedFromConfigured && await canAccessBinary(derivedFromConfigured)) {
+    return derivedFromConfigured
   }
 
   const derivedFromFfmpegEnv = deriveFfprobePathFromFfmpeg(process.env.FFMPEG_PATH)

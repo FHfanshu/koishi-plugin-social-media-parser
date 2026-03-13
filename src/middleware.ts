@@ -8,6 +8,7 @@ import { detectPlatformByUrl, extractSocialUrlsFromSession, isGuildBlocked, isUs
 
 const COOLDOWN_MIN_TTL_MS = 60_000
 const COOLDOWN_MAX_ENTRIES = 5_000
+const COOLDOWN_CLEANUP_INTERVAL_MS = 30_000
 
 export function registerAutoParseMiddleware(
   ctx: Context,
@@ -15,6 +16,9 @@ export function registerAutoParseMiddleware(
   cooldownMap: Map<string, number>
 ): void {
   const logger = ctx.logger('social-media-parser')
+
+  // Lazy cleanup: only run periodically, not on every message
+  let lastCleanupTime = 0
 
   ctx.middleware(async (session, next) => {
     if (!config.autoParse.enabled) {
@@ -41,7 +45,12 @@ export function registerAutoParseMiddleware(
       return next()
     }
 
-    cleanupCooldownMap(cooldownMap, Date.now(), config.network.cooldownMs)
+    // Periodic cleanup instead of per-message
+    const now = Date.now()
+    if (now - lastCleanupTime > COOLDOWN_CLEANUP_INTERVAL_MS) {
+      cleanupCooldownMap(cooldownMap, now, config.network.cooldownMs)
+      lastCleanupTime = now
+    }
 
     if (isUserBlocked(session, config.autoParse.blacklist.users)) {
       if (config.debug) {
@@ -160,7 +169,8 @@ function isPlatformEnabled(config: Config, platform: 'douyin' | 'xiaohongshu' | 
   if (platform === 'twitter') {
     return config.platforms.twitter.enabled
   }
-  return config.platforms.twitter.enabled
+  // Unknown platforms should be disabled by default
+  return false
 }
 
 function getBlockedGuildsByPlatform(

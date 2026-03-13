@@ -99,9 +99,20 @@ export function isPrivateHostname(hostname: string): boolean {
 }
 
 export function isSafePublicHttpUrl(input: string): boolean {
+  if (!input || typeof input !== 'string') {
+    return false
+  }
+
+  // Handle protocol-relative URLs (e.g., //example.com/path)
+  // These are valid and should be treated as HTTPS
+  let normalizedInput = input.trim()
+  if (normalizedInput.startsWith('//')) {
+    normalizedInput = `https:${normalizedInput}`
+  }
+
   let parsed: URL
   try {
-    parsed = new URL(input)
+    parsed = new URL(normalizedInput)
   } catch {
     return false
   }
@@ -203,25 +214,21 @@ export function extractSocialUrlsFromSession(session: Session): string[] {
 
   const elements = (session as any).elements
   if (Array.isArray(elements)) {
-    urls.push(...extractUrlsFromAny(elements))
-
     for (const element of elements) {
       if (!element || typeof element !== 'object') {
         continue
       }
 
+      // 分享卡片直接用正则匹配URL
       if (element.type === 'json' || element.type === 'xml' || element.type === 'app') {
         const raw = element.attrs?.data ?? element.attrs?.content ?? element.data?.data ?? element.data?.content
         if (typeof raw === 'string') {
-          try {
-            const parsed = JSON.parse(decodeEscapedUrl(decodeHtmlEntities(raw)))
-            urls.push(...extractUrlsFromAny(parsed))
-          } catch {
-            urls.push(...extractCandidateUrls(raw))
-          }
-        } else {
-          urls.push(...extractUrlsFromAny(raw))
+          // 直接用正则提取，不尝试JSON解析
+          urls.push(...extractCandidateUrls(decodeEscapedUrl(decodeHtmlEntities(raw))))
         }
+      } else {
+        // 其他元素类型递归提取
+        urls.push(...extractUrlsFromAny(element))
       }
     }
   }

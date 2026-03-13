@@ -9,6 +9,14 @@ interface DouyinVideoMedia {
   title: string
   url: string
   musicUrl?: string
+  author?: string
+  durationSec?: number
+  stats?: {
+    view: number
+    like: number
+    comment: number
+    share: number
+  }
 }
 
 interface DouyinImageMedia {
@@ -16,6 +24,12 @@ interface DouyinImageMedia {
   title: string
   urls: string[]
   musicUrl?: string
+  author?: string
+  stats?: {
+    like: number
+    comment: number
+    share: number
+  }
 }
 
 type DouyinMedia = DouyinVideoMedia | DouyinImageMedia
@@ -77,13 +91,16 @@ function parseDouyinPayload(payload: any, inputUrl: string, config: Config, logg
   }
 
   const media = pickMediaFromHybrid(data, inputUrl, config, logger)
+  const aweme = data?.aweme_detail || data?.awemeDetail || data
   const resolvedUrl = pickString(
-    data?.aweme_detail?.share_url,
-    data?.aweme_detail?.share_info?.share_url,
+    aweme?.share_url,
+    aweme?.share_info?.share_url,
     data?.share_url,
     data?.url,
     inputUrl
   )
+
+  const awemeId = pickString(aweme?.aweme_id, aweme?.awemeId, data?.aweme_id)
 
   if (media.kind === 'video') {
     return {
@@ -93,8 +110,15 @@ function parseDouyinPayload(payload: any, inputUrl: string, config: Config, logg
       images: [],
       videos: [media.url],
       musicUrl: media.musicUrl,
+      videoDurationSec: media.durationSec,
       originalUrl: inputUrl,
       resolvedUrl,
+      extra: {
+        awemeId,
+        author: media.author,
+        kind: 'video',
+        stats: media.stats,
+      },
     }
   }
 
@@ -107,6 +131,12 @@ function parseDouyinPayload(payload: any, inputUrl: string, config: Config, logg
     musicUrl: media.musicUrl,
     originalUrl: inputUrl,
     resolvedUrl,
+    extra: {
+      awemeId,
+      author: media.author,
+      kind: 'images',
+      stats: media.stats,
+    },
   }
 }
 
@@ -181,14 +211,20 @@ function pickMediaFromHybrid(root: any, inputUrl: string, config: Config, logger
   for (const node of nodes) {
     const title = extractTitle(node, inputUrl)
     const musicUrl = extractMusicUrl(node)
+    const author = extractAuthor(node)
+    const stats = extractStats(node)
 
     const videos = extractVideoUrls(node)
     if (videos.length > 0) {
+      const durationSec = extractDuration(node)
       return {
         kind: 'video',
         title,
         url: videos[0],
         musicUrl,
+        author,
+        durationSec,
+        stats,
       }
     }
 
@@ -200,6 +236,8 @@ function pickMediaFromHybrid(root: any, inputUrl: string, config: Config, logger
           title,
           urls: images,
           musicUrl,
+          author,
+          stats,
         }
       }
     }
@@ -415,6 +453,43 @@ function extractMusicUrl(node: any): string | undefined {
   )
 
   return value || undefined
+}
+
+function extractAuthor(node: any): string | undefined {
+  const name = pickString(
+    node?.author?.nickname,
+    node?.author?.nick_name,
+    node?.author?.name,
+    node?.author_nickname,
+    node?.author_name,
+    node?.nickname,
+    node?.name
+  )
+  return name || undefined
+}
+
+function extractDuration(node: any): number | undefined {
+  const duration = toNumber(
+    node?.video?.duration || node?.video?.duration_ms || node?.duration || node?.duration_ms
+  )
+  if (duration > 0) {
+    // duration_ms is in milliseconds, convert to seconds
+    return duration > 1000 ? Math.floor(duration / 1000) : duration
+  }
+  return undefined
+}
+
+function extractStats(node: any): { view: number; like: number; comment: number; share: number } | undefined {
+  const stats = node?.statistics || node?.stats
+  if (!stats && !node?.digg_count && !node?.comment_count) {
+    return undefined
+  }
+  return {
+    view: toNumber(stats?.play_count || stats?.view_count || node?.play_count || node?.view_count),
+    like: toNumber(stats?.digg_count || stats?.like_count || node?.digg_count || node?.like_count),
+    comment: toNumber(stats?.comment_count || node?.comment_count),
+    share: toNumber(stats?.share_count || stats?.forward_count || node?.share_count || node?.forward_count),
+  }
 }
 
 async function fetchJson(ctx: Context, url: string, timeoutMs: number): Promise<any> {
