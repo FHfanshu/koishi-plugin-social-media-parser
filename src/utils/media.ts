@@ -10,6 +10,19 @@ import type { DownloadedBuffer } from './http'
 import { toDataUri, toMediaUrl } from './storage'
 import { isSafePublicHttpUrl } from './url'
 
+// Video skip reason types for user-friendly messages
+type VideoSkipReason =
+  | { type: 'duration_exceeded'; durationMin: number; limitMin: number }
+  | { type: 'size_exceeded'; sizeMb: number; limitMb: number }
+  | { type: 'download_failed'; error: string }
+  | { type: 'url_unsafe' }
+  | { type: 'onebot_requires_download' }
+  | { type: 'other'; message: string }
+
+type VideoBuildResult =
+  | { success: true; element: any }
+  | { success: false; reason: VideoSkipReason }
+
 export async function sendParsedContent(
   ctx: Context,
   session: Session,
@@ -41,11 +54,10 @@ export async function sendParsedContent(
 
   if (parsed.videos.length > 0) {
     const primaryVideo = parsed.videos[0]
-    const videoElement = await buildVideoElement(ctx, primaryVideo, parsed, config, logger, isOneBot)
+    const result = await buildVideoElement(ctx, primaryVideo, parsed, config, logger, isOneBot)
 
-    if (!videoElement) {
-      logger.info(`video unavailable or skipped, fallback to image/text: ${primaryVideo}`)
-    } else {
+    if (result.success) {
+      const { element } = result
       const imageSegments = imageUrls.length > 0
         ? await buildImageSegments(ctx, imageUrls, config, logger)
         : []
@@ -58,15 +70,25 @@ export async function sendParsedContent(
         } else {
           await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
         }
-        await session.send(videoElement)
+        await session.send(element)
       } else {
         await sendIntroPlain(session, intro)
         await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
-        await session.send(videoElement)
+        await session.send(element)
       }
 
       return
     }
+
+    // Video build failed, send user-friendly message
+    const reason = (result as { success: false; reason: VideoSkipReason }).reason
+    const skipMessage = buildVideoSkipMessage(reason, platformName, sourceUrl)
+    if (skipMessage) {
+      logger.info(`sending video skip message to user: ${skipMessage.split('\n')[0]}...`)
+      await session.send(skipMessage)
+    }
+    logger.info(`video unavailable: ${JSON.stringify(reason)}`)
+    // Continue to send images/text as fallback
   }
 
   if (imageUrls.length > 0) {
@@ -121,6 +143,29 @@ function getPlatformName(platform: ParsedContent['platform']): string {
   }
 }
 
+function buildVideoSkipMessage(
+  reason: VideoSkipReason,
+  platformName: string,
+  sourceUrl: string
+): string | null {
+  switch (reason.type) {
+    case 'duration_exceeded':
+      return `视频太长啦！（${reason.durationMin}分钟 > ${reason.limitMin}分钟限制）\n去${platformName}看吧！\n${sourceUrl}`
+
+    case 'size_exceeded':
+      return `视频太大啦！（${reason.sizeMb}MB > ${reason.limitMb}MB限制）\n去${platformName}看吧！\n${sourceUrl}`
+
+    case 'download_failed':
+    case 'onebot_requires_download':
+      return `视频获取失败，去${platformName}看吧！\n${sourceUrl}`
+
+    case 'url_unsafe':
+    case 'other':
+    default:
+      return null
+  }
+}
+
 function resolveImageUrlsForSend(parsed: ParsedContent, config: Config): string[] {
   const primary = Array.isArray(parsed.images) ? parsed.images : []
   if (parsed.platform !== 'twitter') {
@@ -140,10 +185,10 @@ async function buildVideoElement(
   config: Config,
   logger: Logger,
   isOneBot: boolean
-): Promise<any> {
+): Promise<VideoBuildResult> {
   if (!isSafePublicHttpUrl(url)) {
     logger.warn(`video send skipped by url safety policy: ${url}`)
-    return null
+    return { success: false, reason: { type: 'url_unsafe' } }
   }
 
   const hasStorage = hasStorageService(ctx)
@@ -166,12 +211,13 @@ async function buildVideoElement(
     if (videoSendMode === 'url' && !needsAudioMerge) {
       if (config.media.maxDurationSec && config.media.maxDurationSec > 0) {
         downloaded = await downloadVideoForSend(ctx, url, config)
-        if (!await isDurationAllowed(downloaded, url, config, logger, knownDurationSec, allowUnknownDuration)) {
-          return null
+        const durationCheck = await isDurationAllowed(downloaded, url, config, logger, knownDurationSec, allowUnknownDuration)
+        if (!durationCheck.allowed) {
+          return { success: false, reason: durationCheck.reason! }
         }
       }
 
-      return segment.video(url)
+      return { success: true, element: segment.video(url) }
     }
 
     // Download video (and audio if needed for DASH merge)
@@ -187,23 +233,28 @@ async function buildVideoElement(
       }
     }
 
-    if (!await isDurationAllowed(downloaded, url, config, logger, knownDurationSec, allowUnknownDuration)) {
-      return null
+    const durationCheck = await isDurationAllowed(downloaded, url, config, logger, knownDurationSec, allowUnknownDuration)
+    if (!durationCheck.allowed) {
+      return { success: false, reason: durationCheck.reason! }
     }
 
     return buildConfiguredVideoElement(ctx, downloaded, config, logger, videoSendMode, hasStorage, isOneBot)
   } catch (error) {
-    logger.info(`video build failed: ${String((error as Error)?.message || error)}`)
+    const errorMsg = String((error as Error)?.message || error)
+    logger.info(`video build failed: ${errorMsg}`)
     if (!config.media.fallbackToUrlOnError) {
-      throw error
+      return { success: false, reason: { type: 'download_failed', error: errorMsg } }
     }
 
     if (config.media.maxDurationSec && config.media.maxDurationSec > 0) {
       const payload = downloaded || await downloadVideoForSend(ctx, url, config).catch(() => null)
       if (!payload) {
         logger.warn(`video fallback: unable to verify duration (download failed), proceeding with url fallback, url=${url}`)
-      } else if (!await isDurationAllowed(payload, url, config, logger, knownDurationSec, allowUnknownDuration)) {
-        return null
+      } else {
+        const durationCheck = await isDurationAllowed(payload, url, config, logger, knownDurationSec, allowUnknownDuration)
+        if (!durationCheck.allowed) {
+          return { success: false, reason: durationCheck.reason! }
+        }
       }
     }
 
@@ -213,15 +264,15 @@ async function buildVideoElement(
 
     if (!isSafePublicHttpUrl(url)) {
       logger.warn(`video fallback skipped by url safety policy: ${url}`)
-      return null
+      return { success: false, reason: { type: 'url_unsafe' } }
     }
 
     if (videoSendMode !== 'url' && isOneBot) {
       logger.warn(`video fallback skipped: onebot requires downloaded video for ${videoSendMode} mode, url=${url}`)
-      return null
+      return { success: false, reason: { type: 'onebot_requires_download' } }
     }
 
-    return segment.video(url)
+    return { success: true, element: segment.video(url) }
   }
 }
 
@@ -233,29 +284,32 @@ async function buildConfiguredVideoElement(
   videoSendMode: Config['media']['videoSendMode'],
   hasStorage: boolean,
   isOneBot: boolean
-): Promise<any> {
+): Promise<VideoBuildResult> {
   const optimized = await optimizeVideoBeforeSend(downloaded.buffer, downloaded.mimeType || 'video/mp4', config, logger)
   const finalBuffer = optimized?.buffer || downloaded.buffer
   const finalMime = optimized?.mimeType || downloaded.mimeType || 'video/mp4'
 
   if (videoSendMode === 'storage') {
     const storedUrl = await toMediaUrl(ctx, finalMime, finalBuffer, 'send_video', logger)
-    return buildVideoSegmentFromMediaUrl(storedUrl, finalBuffer)
+    const element = buildVideoSegmentFromMediaUrl(storedUrl, finalBuffer)
+    return { success: true, element }
   }
 
   if (finalBuffer.length > config.media.maxBytes) {
+    const sizeMb = Math.round(finalBuffer.length / 1024 / 1024)
+    const limitMb = Math.round(config.media.maxBytes / 1024 / 1024)
     logger.warn(`video send skipped: payload too large ${finalBuffer.length} > ${config.media.maxBytes}`)
-    return null
+    return { success: false, reason: { type: 'size_exceeded', sizeMb, limitMb } }
   }
 
   if (videoSendMode === 'base64' || isOneBot || !hasStorage) {
-    return segment.video(toDataUri(finalMime, finalBuffer))
+    return { success: true, element: segment.video(toDataUri(finalMime, finalBuffer)) }
   }
 
   try {
-    return h.video(finalBuffer, finalMime)
+    return { success: true, element: h.video(finalBuffer, finalMime) }
   } catch {
-    return segment.video(toDataUri(finalMime, finalBuffer))
+    return { success: true, element: segment.video(toDataUri(finalMime, finalBuffer)) }
   }
 }
 
@@ -353,9 +407,9 @@ async function isDurationAllowed(
   logger: Logger,
   knownDurationSec: number | null,
   allowUnknownDuration: boolean
-): Promise<boolean> {
+): Promise<{ allowed: boolean; reason?: VideoSkipReason }> {
   if (!config.media.maxDurationSec || config.media.maxDurationSec <= 0) {
-    return true
+    return { allowed: true }
   }
 
   const durationSec = knownDurationSec && knownDurationSec > 0
@@ -369,21 +423,28 @@ async function isDurationAllowed(
   if (durationSec == null) {
     if (allowUnknownDuration) {
       logger.warn(`video duration probe failed, allow unknown duration fallback: ${url}`)
-      return true
+      return { allowed: true }
     }
 
     logger.warn(`video send skipped: duration probe failed, url=${url}`)
-    return false
+    return { allowed: false, reason: { type: 'download_failed', error: 'duration probe failed' } }
   }
 
   if (durationSec > config.media.maxDurationSec) {
     const limitMin = Math.round(config.media.maxDurationSec / 60)
     const actualMin = Math.round(durationSec / 60)
     logger.info(`video send skipped: duration ${actualMin}min exceeds limit ${limitMin}min, url=${url}`)
-    return false
+    return {
+      allowed: false,
+      reason: {
+        type: 'duration_exceeded',
+        durationMin: actualMin,
+        limitMin,
+      },
+    }
   }
 
-  return true
+  return { allowed: true }
 }
 
 async function optimizeVideoBeforeSend(

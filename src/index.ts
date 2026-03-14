@@ -58,13 +58,7 @@ export const usage = `
 
 - 自动解析支持平台级群聊黑名单：\`platforms.<platform>.autoParseBlockedGuilds\`。
 - 自动解析用户黑名单：\`autoParse.blacklist.users\`。
-- 自动解析命中后直接发送解析结果，不做 ChatLuna 上下文注入。
-
-### 视频处理策略
-
-- 短视频（<= videoMaxDurationSec）压缩后注入。
-- 长视频（> videoMaxDurationSec）按间隔抽帧注入，并可保留音频。
-- \`media.videoSendMode\` 可切换 storage / base64 / url 三种视频发送策略。
+- 自动解析命中后发送解析结果。
 
 ### 注意事项
 
