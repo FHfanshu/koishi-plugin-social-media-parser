@@ -311,6 +311,67 @@ export async function probeVideoDuration(input: Buffer, mimeType: string, timeou
   }
 }
 
+/**
+ * Merge video and audio buffers using ffmpeg.
+ * Used for DASH streams where video and audio are separate (e.g., Bilibili).
+ */
+export async function mergeVideoAudioBuffers(
+  videoBuffer: Buffer,
+  videoMime: string,
+  audioBuffer: Buffer,
+  audioMime: string,
+  timeoutMs: number,
+  logger?: Logger
+): Promise<Buffer | null> {
+  const ffmpeg = await resolveFfmpegBinary()
+  if (!ffmpeg) {
+    logger?.warn('mergeVideoAudioBuffers: ffmpeg not available')
+    return null
+  }
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'social-media-merge-'))
+  const videoPath = path.join(tempDir, `video${extensionFromMime(videoMime)}`)
+  const audioPath = path.join(tempDir, `audio${extensionFromMime(audioMime)}`)
+  const outputPath = path.join(tempDir, 'merged.mp4')
+
+  try {
+    await writeFile(videoPath, videoBuffer)
+    await writeFile(audioPath, audioBuffer)
+
+    logger?.warn(`[social-media-parser] mergeVideoAudioBuffers: ffmpeg available, merging...`)
+
+    await runCommand(
+      ffmpeg,
+      [
+        '-y',
+        '-i', videoPath,
+        '-i', audioPath,
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-map', '0:v:0',
+        '-map', '1:a:0',
+        outputPath,
+      ],
+      timeoutMs
+    )
+
+    const buffer = await readFile(outputPath)
+    if (!buffer.length) {
+      logger?.warn('mergeVideoAudioBuffers: output file is empty')
+      return null
+    }
+
+    logger?.warn(`[social-media-parser] mergeVideoAudioBuffers success: output size=${buffer.length}`)
+    return buffer
+  } catch (error) {
+    logger?.warn(`mergeVideoAudioBuffers failed: ${String((error as Error)?.message || error)}`)
+    return null
+  } finally {
+    await safeCleanup(tempDir)
+  }
+}
+
 async function readVideoDuration(ffprobe: string, inputPath: string, timeoutMs: number): Promise<number | null> {
   try {
     const output = await runCommand(

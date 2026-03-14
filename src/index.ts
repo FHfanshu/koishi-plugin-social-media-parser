@@ -89,11 +89,29 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   // Get ffmpeg paths from Koishi ffmpeg service and configure compress module
   // This avoids polluting process.env which can affect other plugins in the same process
-  const ffmpegService = (ctx as Context & { ffmpeg?: FfmpegServiceLike }).ffmpeg
-  const ffmpegPath = ffmpegService?.executable || ffmpegService?.path || ffmpegService?.ffmpegPath || null
-  const ffprobePath =
-    ffmpegService?.ffprobePath || ffmpegService?.ffprobe || deriveFfprobePathFromFfmpeg(ffmpegPath) || null
-  setFfmpegPaths(ffmpegPath, ffprobePath)
+  // Note: ffmpeg-path initializes asynchronously, so we inject it to ensure it's ready
+  ctx.inject(['ffmpeg'], (innerCtx) => {
+    const ffmpegService = (innerCtx as Context & { ffmpeg?: FfmpegServiceLike }).ffmpeg
+    const ffmpegPath = ffmpegService?.executable || ffmpegService?.path || ffmpegService?.ffmpegPath || null
+    const ffprobePath =
+      ffmpegService?.ffprobePath || ffmpegService?.ffprobe || deriveFfprobePathFromFfmpeg(ffmpegPath) || null
+    if (ffmpegPath) {
+      ctx.logger.warn(`[social-media-parser] using ffmpeg: ${ffmpegPath}`)
+    }
+    setFfmpegPaths(ffmpegPath, ffprobePath)
+  })
+
+  // Fallback: also try in ready event in case inject didn't work (ffmpeg is optional)
+  ctx.on('ready', () => {
+    const ffmpegService = (ctx as Context & { ffmpeg?: FfmpegServiceLike }).ffmpeg
+    if (ffmpegService?.executable) {
+      const ffmpegPath = ffmpegService.executable
+      const ffprobePath =
+        ffmpegService?.ffprobePath || ffmpegService?.ffprobe || deriveFfprobePathFromFfmpeg(ffmpegPath) || null
+      ctx.logger.warn(`[social-media-parser] ready: using ffmpeg: ${ffmpegPath}`)
+      setFfmpegPaths(ffmpegPath, ffprobePath)
+    }
+  })
 
   registerParseCommand(ctx, resolvedConfig)
   registerAutoParseMiddleware(ctx, resolvedConfig, cooldownMap)

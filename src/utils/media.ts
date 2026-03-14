@@ -4,7 +4,7 @@ import type { Context, Logger, Session } from 'koishi'
 import type { Config } from '../config'
 import { DEFAULT_MEDIA_INJECT_CONFIG } from '../config'
 import type { ParsedContent } from '../types'
-import { processVideoForContext, probeVideoDuration } from './compress'
+import { mergeVideoAudioBuffers, processVideoForContext, probeVideoDuration } from './compress'
 import { downloadBuffer } from './http'
 import type { DownloadedBuffer } from './http'
 import { toDataUri, toMediaUrl } from './storage'
@@ -154,9 +154,16 @@ async function buildVideoElement(
   const allowUnknownDuration =
     (parsed.platform === 'bilibili' || parsed.platform === 'douyin' || parsed.platform === 'xiaohongshu')
     && config.media.fallbackToUrlOnError
+
+  // Check if we need to merge audio for DASH streams (Bilibili)
+  const audioUrl = parsed.audios?.[0]
+  const needsAudioMerge = audioUrl && isSafePublicHttpUrl(audioUrl)
+
+  logger.warn(`[social-media-parser] buildVideoElement: platform=${parsed.platform}, videoUrl=${url.substring(0, 80)}..., audioUrl=${audioUrl ? audioUrl.substring(0, 80) + '...' : 'none'}, needsAudioMerge=${needsAudioMerge}`)
+
   let downloaded: DownloadedBuffer | null = null
   try {
-    if (videoSendMode === 'url') {
+    if (videoSendMode === 'url' && !needsAudioMerge) {
       if (config.media.maxDurationSec && config.media.maxDurationSec > 0) {
         downloaded = await downloadVideoForSend(ctx, url, config)
         if (!await isDurationAllowed(downloaded, url, config, logger, knownDurationSec, allowUnknownDuration)) {
@@ -167,7 +174,19 @@ async function buildVideoElement(
       return segment.video(url)
     }
 
+    // Download video (and audio if needed for DASH merge)
     downloaded = await downloadVideoForSend(ctx, url, config)
+
+    // Merge audio if available (Bilibili DASH streams)
+    if (needsAudioMerge) {
+      const merged = await mergeVideoAudio(ctx, downloaded, audioUrl, config, logger)
+      if (merged) {
+        downloaded = merged
+      } else {
+        logger.warn(`video audio merge failed, using video-only stream: ${url}`)
+      }
+    }
+
     if (!await isDurationAllowed(downloaded, url, config, logger, knownDurationSec, allowUnknownDuration)) {
       return null
     }
@@ -283,6 +302,47 @@ async function downloadVideoForSend(ctx: Context, url: string, config: Config): 
       },
       maxBytes: maxVideoBytes,
     })
+  }
+}
+
+async function mergeVideoAudio(
+  ctx: Context,
+  video: DownloadedBuffer,
+  audioUrl: string,
+  config: Config,
+  logger: Logger
+): Promise<DownloadedBuffer | null> {
+  try {
+    const audio = await downloadBuffer(ctx, audioUrl, config.network.timeoutMs, {
+      headers: {
+        referer: 'https://www.bilibili.com/',
+        accept: '*/*',
+      },
+      maxBytes: config.media.maxBytes,
+    })
+
+    const merged = await mergeVideoAudioBuffers(
+      video.buffer,
+      video.mimeType || 'video/mp4',
+      audio.buffer,
+      audio.mimeType || 'audio/mp4',
+      DEFAULT_MEDIA_INJECT_CONFIG.ffmpegTimeoutMs,
+      logger
+    )
+
+    if (!merged) {
+      return null
+    }
+
+    logger.warn(`[social-media-parser] merged video and audio streams: ${video.buffer.length} + ${audio.buffer.length} -> ${merged.length} bytes`)
+    return {
+      buffer: merged,
+      mimeType: 'video/mp4',
+      url: video.url,
+    }
+  } catch (error) {
+    logger.warn(`merge video audio failed: ${String((error as Error)?.message || error)}`)
+    return null
   }
 }
 
