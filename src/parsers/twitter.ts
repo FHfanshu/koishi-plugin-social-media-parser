@@ -182,9 +182,6 @@ async function resolveImagesByOrder(
   maxImages: number
 ): Promise<{ value: string[]; provider?: TwitterProvider; fallback: string[] }> {
   const limit = Math.max(1, maxImages || 1)
-  let primaryProvider: TwitterProvider | undefined
-  const primaryImages: string[] = []
-  const fallbackImages: string[] = []
 
   for (const provider of order) {
     let images: string[] = []
@@ -197,30 +194,16 @@ async function resolveImagesByOrder(
       images = dedupe(grok?.images || [])
     }
 
-    if (!images.length) {
-      continue
+    if (images.length) {
+      return {
+        value: images.slice(0, limit),
+        provider,
+        fallback: images.slice(limit),
+      }
     }
-
-    if (!primaryProvider) {
-      primaryProvider = provider
-      primaryImages.push(...images)
-      continue
-    }
-
-    fallbackImages.push(...images)
   }
 
-  const value = dedupe(primaryImages).slice(0, limit)
-  const fallback = dedupe([
-    ...fallbackImages,
-    ...primaryImages.slice(limit),
-  ]).filter((item) => !value.includes(item))
-
-  return {
-    value,
-    provider: primaryProvider,
-    fallback,
-  }
+  return { value: [], fallback: [] }
 }
 
 async function resolveVideosByOrder(

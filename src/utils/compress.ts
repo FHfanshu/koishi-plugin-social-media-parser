@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { constants as fsConstants } from 'node:fs'
 import { access, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { promisify } from 'node:util'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -11,6 +12,7 @@ import type { MediaInjectConfig } from '../config'
 import { extensionFromMime } from './http'
 
 const BINARY_ACCESS = fsConstants.X_OK
+const execFileAsync = promisify(execFile)
 
 export async function compressImageForContext(
   input: Buffer,
@@ -545,12 +547,19 @@ async function canAccessBinary(bin: string): Promise<boolean> {
     return false
   }
 
-  if (!bin.includes('/')) {
-    return true
+  if (bin.includes('/')) {
+    try {
+      await access(bin, BINARY_ACCESS)
+      return true
+    } catch {
+      return false
+    }
   }
 
+  // For bare commands, verify with which/where
+  const command = process.platform === 'win32' ? 'where' : 'which'
   try {
-    await access(bin, BINARY_ACCESS)
+    await execFileAsync(command, [bin], { timeout: 5000 })
     return true
   } catch {
     return false

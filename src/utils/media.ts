@@ -471,7 +471,31 @@ async function isDurationAllowed(
   knownDurationSec: number | null,
   allowUnknownDuration: boolean
 ): Promise<{ allowed: boolean; reason?: VideoSkipReason }> {
-  // 跳过时长探测，避免 ffprobe 对某些视频格式兼容性问题
+  const maxDurationSec = config.media.maxDurationSec
+
+  if (!maxDurationSec || maxDurationSec <= 0) {
+    return { allowed: true }
+  }
+
+  // Only use known duration from API, no ffprobe probing
+  // Short video platforms (douyin, xiaohongshu, twitter) don't need duration check
+  // Bilibili returns duration from API directly
+  if (knownDurationSec == null || knownDurationSec <= 0) {
+    // Unknown duration - allow through for short video platforms
+    return { allowed: true }
+  }
+
+  // Check against limit
+  if (knownDurationSec > maxDurationSec) {
+    const limitMin = Math.round(maxDurationSec / 60)
+    const actualMin = Math.round(knownDurationSec / 60)
+    logger.info(`video skipped: duration ${actualMin}min exceeds limit ${limitMin}min: source=${url}`)
+    return {
+      allowed: false,
+      reason: { type: 'duration_exceeded', durationMin: actualMin, limitMin }
+    }
+  }
+
   return { allowed: true }
 }
 
@@ -670,8 +694,8 @@ async function sendForwardNodes(
     }
 
     if (forwardResult === 'timeout') {
-      // Treat timeout as potentially already sent to avoid duplicate forward messages.
-      return true
+      // Fall through to koishi native forward instead of returning true
+      logger.warn('forward onebot api timeout, falling back to koishi native forward')
     }
 
     // OneBot API failed with non-timeout error, fall through to koishi forward
