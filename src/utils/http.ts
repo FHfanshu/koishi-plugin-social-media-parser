@@ -172,6 +172,7 @@ export function guessMimeFromUrl(url: string): string {
   if (lower.includes('.webm')) return 'video/webm'
   if (lower.includes('.mov')) return 'video/mov'
   if (lower.includes('.m4a')) return 'audio/mp4'
+  if (lower.includes('.m4s')) return 'video/mp4' // B站 DASH 视频流
   if (lower.includes('.mp3')) return 'audio/mpeg'
   if (lower.includes('.aac')) return 'audio/aac'
   return 'application/octet-stream'
@@ -210,6 +211,14 @@ export function extensionFromMime(mimeType: string): string {
     case 'audio/aac':
       return '.aac'
     default:
+      // For video/* types, default to .mp4
+      if (mimeType.startsWith('video/')) {
+        return '.mp4'
+      }
+      // For audio/* types, default to .m4a
+      if (mimeType.startsWith('audio/')) {
+        return '.m4a'
+      }
       return '.bin'
   }
 }

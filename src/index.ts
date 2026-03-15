@@ -7,6 +7,8 @@ import type { Config as PluginConfig } from './config'
 import { registerParseCommand } from './command'
 import { registerAutoParseMiddleware } from './middleware'
 import { setFfmpegPaths } from './utils/compress'
+import { setVideoCacheManager } from './utils/media'
+import { getVideoCacheManager } from './utils/video-cache'
 
 type FfmpegServiceLike = {
   executable?: string
@@ -106,6 +108,19 @@ export function apply(ctx: Context, config: PluginConfig): void {
       setFfmpegPaths(ffmpegPath, ffprobePath)
     }
   })
+
+  // Initialize video cache manager
+  const videoCacheConfig = resolvedConfig.media.videoCache
+  const videoCacheMgr = getVideoCacheManager(videoCacheConfig, logger)
+  setVideoCacheManager(videoCacheMgr)
+
+  if (videoCacheConfig.enabled) {
+    logger.info(`video cache enabled: ttl=${Math.round(videoCacheConfig.ttlMs / 1000 / 60)}min, maxSize=${Math.round(videoCacheConfig.maxSizeBytes / 1024 / 1024)}MB, maxEntries=${videoCacheConfig.maxEntries}`)
+    // Set up periodic cleanup every 5 minutes
+    ctx.setInterval(() => videoCacheMgr.cleanup(), 5 * 60 * 1000)
+  } else {
+    logger.info('video cache disabled')
+  }
 
   registerParseCommand(ctx, resolvedConfig)
   registerAutoParseMiddleware(ctx, resolvedConfig, cooldownMap)

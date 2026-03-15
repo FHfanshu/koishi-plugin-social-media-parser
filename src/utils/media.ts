@@ -4,11 +4,12 @@ import type { Context, Logger, Session } from 'koishi'
 import type { Config } from '../config'
 import { DEFAULT_MEDIA_INJECT_CONFIG } from '../config'
 import type { ParsedContent } from '../types'
-import { mergeVideoAudioBuffers, processVideoForContext, probeVideoDuration } from './compress'
+import { mergeVideoAudioBuffers, processVideoForContext } from './compress'
 import { downloadBuffer } from './http'
 import type { DownloadedBuffer } from './http'
 import { toDataUri, toMediaUrl } from './storage'
 import { isSafePublicHttpUrl } from './url'
+import { generateCacheKey, VideoCacheManager, type VideoCacheConfig } from './video-cache'
 
 // Video skip reason types for user-friendly messages
 type VideoSkipReason =
@@ -22,6 +23,17 @@ type VideoSkipReason =
 type VideoBuildResult =
   | { success: true; element: any }
   | { success: false; reason: VideoSkipReason }
+
+// Module-level video cache manager (set by the plugin)
+let videoCacheManager: VideoCacheManager | null = null
+
+/**
+ * Set the video cache manager instance.
+ * Called from the plugin initialization.
+ */
+export function setVideoCacheManager(manager: VideoCacheManager | null): void {
+  videoCacheManager = manager
+}
 
 export async function sendParsedContent(
   ctx: Context,
@@ -197,7 +209,7 @@ async function buildVideoElement(
     ? Number(parsed.videoDurationSec)
     : null
   const allowUnknownDuration =
-    (parsed.platform === 'bilibili' || parsed.platform === 'douyin' || parsed.platform === 'xiaohongshu')
+    (parsed.platform === 'bilibili' || parsed.platform === 'douyin' || parsed.platform === 'xiaohongshu' || parsed.platform === 'twitter')
     && config.media.fallbackToUrlOnError
 
   // Check if we need to merge audio for DASH streams (Bilibili)
@@ -210,7 +222,7 @@ async function buildVideoElement(
   try {
     if (videoSendMode === 'url' && !needsAudioMerge) {
       if (config.media.maxDurationSec && config.media.maxDurationSec > 0) {
-        downloaded = await downloadVideoForSend(ctx, url, config)
+        downloaded = await downloadVideoForSend(ctx, url, config, logger)
         const durationCheck = await isDurationAllowed(downloaded, url, config, logger, knownDurationSec, allowUnknownDuration)
         if (!durationCheck.allowed) {
           return { success: false, reason: durationCheck.reason! }
@@ -221,15 +233,17 @@ async function buildVideoElement(
     }
 
     // Download video (and audio if needed for DASH merge)
-    downloaded = await downloadVideoForSend(ctx, url, config)
+    downloaded = await downloadVideoForSend(ctx, url, config, logger)
 
     // Merge audio if available (Bilibili DASH streams)
     if (needsAudioMerge) {
-      const merged = await mergeVideoAudio(ctx, downloaded, audioUrl, config, logger)
+      const merged = await mergeVideoAudio(ctx, downloaded, audioUrl, config, logger, knownDurationSec ?? undefined)
       if (merged) {
         downloaded = merged
       } else {
-        logger.warn(`video audio merge failed, using video-only stream: ${url}`)
+        // 音频合并失败时直接报错，不发送无声音的视频
+        logger.warn(`video audio merge failed, skipping video: ${url}`)
+        return { success: false, reason: { type: 'download_failed', error: 'audio merge failed' } }
       }
     }
 
@@ -247,7 +261,7 @@ async function buildVideoElement(
     }
 
     if (config.media.maxDurationSec && config.media.maxDurationSec > 0) {
-      const payload = downloaded || await downloadVideoForSend(ctx, url, config).catch(() => null)
+      const payload = downloaded || await downloadVideoForSend(ctx, url, config, logger).catch(() => null)
       if (!payload) {
         logger.warn(`video fallback: unable to verify duration (download failed), proceeding with url fallback, url=${url}`)
       } else {
@@ -334,11 +348,34 @@ function hasStorageService(ctx: Context): boolean {
   return Boolean(storage?.createTempFile)
 }
 
-async function downloadVideoForSend(ctx: Context, url: string, config: Config): Promise<DownloadedBuffer> {
+async function downloadVideoForSend(ctx: Context, url: string, config: Config, logger?: Logger): Promise<DownloadedBuffer> {
   const maxVideoBytes = Math.max(config.media.maxBytes, config.media.maxVideoBytes || config.media.maxBytes)
   const referer = inferMediaReferer(url)
+
+  // Generate cache key for simple video URL (non-DASH)
+  const cacheKey = generateCacheKey(url)
+
+  // Use cache manager if available and enabled
+  if (videoCacheManager && config.media.videoCache?.enabled) {
+    return videoCacheManager.getOrDownload(cacheKey, async () => {
+      logger?.debug(`video cache: downloading video from ${url.substring(0, 80)}...`)
+      return doDownloadVideo(ctx, url, maxVideoBytes, referer, config.network.timeoutMs)
+    })
+  }
+
+  // Fallback to direct download without caching
+  return doDownloadVideo(ctx, url, maxVideoBytes, referer, config.network.timeoutMs)
+}
+
+async function doDownloadVideo(
+  ctx: Context,
+  url: string,
+  maxVideoBytes: number,
+  referer: string,
+  timeoutMs: number
+): Promise<DownloadedBuffer> {
   try {
-    return await downloadBuffer(ctx, url, config.network.timeoutMs, {
+    return await downloadBuffer(ctx, url, timeoutMs, {
       headers: referer
         ? {
             referer,
@@ -350,7 +387,7 @@ async function downloadVideoForSend(ctx: Context, url: string, config: Config): 
       maxBytes: maxVideoBytes,
     })
   } catch {
-    return downloadBuffer(ctx, url, config.network.timeoutMs, {
+    return downloadBuffer(ctx, url, timeoutMs, {
       headers: {
         accept: '*/*',
       },
@@ -364,8 +401,25 @@ async function mergeVideoAudio(
   video: DownloadedBuffer,
   audioUrl: string,
   config: Config,
-  logger: Logger
+  logger: Logger,
+  knownDurationSec?: number
 ): Promise<DownloadedBuffer | null> {
+  // Generate cache key for video+audio combination (B站 DASH)
+  const mergedCacheKey = generateCacheKey(video.url, audioUrl)
+
+  // Check if merged result is already cached
+  if (videoCacheManager && config.media.videoCache?.enabled) {
+    const cached = videoCacheManager.get(mergedCacheKey)
+    if (cached) {
+      logger.debug(`video cache hit for merged DASH stream: ${mergedCacheKey}`)
+      return {
+        buffer: cached.buffer,
+        mimeType: cached.mimeType,
+        url: cached.url,
+      }
+    }
+  }
+
   try {
     const audio = await downloadBuffer(ctx, audioUrl, config.network.timeoutMs, {
       headers: {
@@ -381,7 +435,8 @@ async function mergeVideoAudio(
       audio.buffer,
       audio.mimeType || 'audio/mp4',
       DEFAULT_MEDIA_INJECT_CONFIG.ffmpegTimeoutMs,
-      logger
+      logger,
+      knownDurationSec
     )
 
     if (!merged) {
@@ -389,11 +444,19 @@ async function mergeVideoAudio(
     }
 
     logger.warn(`[social-media-parser] merged video and audio streams: ${video.buffer.length} + ${audio.buffer.length} -> ${merged.length} bytes`)
-    return {
+
+    const result: DownloadedBuffer = {
       buffer: merged,
       mimeType: 'video/mp4',
       url: video.url,
     }
+
+    // Cache the merged result
+    if (videoCacheManager && config.media.videoCache?.enabled) {
+      videoCacheManager.set(mergedCacheKey, result)
+    }
+
+    return result
   } catch (error) {
     logger.warn(`merge video audio failed: ${String((error as Error)?.message || error)}`)
     return null
@@ -408,42 +471,7 @@ async function isDurationAllowed(
   knownDurationSec: number | null,
   allowUnknownDuration: boolean
 ): Promise<{ allowed: boolean; reason?: VideoSkipReason }> {
-  if (!config.media.maxDurationSec || config.media.maxDurationSec <= 0) {
-    return { allowed: true }
-  }
-
-  const durationSec = knownDurationSec && knownDurationSec > 0
-    ? knownDurationSec
-    : await probeVideoDuration(
-      downloaded.buffer,
-      downloaded.mimeType || 'video/mp4',
-      DEFAULT_MEDIA_INJECT_CONFIG.ffmpegTimeoutMs
-    )
-
-  if (durationSec == null) {
-    if (allowUnknownDuration) {
-      logger.warn(`video duration probe failed, allow unknown duration fallback: ${url}`)
-      return { allowed: true }
-    }
-
-    logger.warn(`video send skipped: duration probe failed, url=${url}`)
-    return { allowed: false, reason: { type: 'download_failed', error: 'duration probe failed' } }
-  }
-
-  if (durationSec > config.media.maxDurationSec) {
-    const limitMin = Math.round(config.media.maxDurationSec / 60)
-    const actualMin = Math.round(durationSec / 60)
-    logger.info(`video send skipped: duration ${actualMin}min exceeds limit ${limitMin}min, url=${url}`)
-    return {
-      allowed: false,
-      reason: {
-        type: 'duration_exceeded',
-        durationMin: actualMin,
-        limitMin,
-      },
-    }
-  }
-
+  // 跳过时长探测，避免 ffprobe 对某些视频格式兼容性问题
   return { allowed: true }
 }
 

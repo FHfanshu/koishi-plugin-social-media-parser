@@ -321,7 +321,8 @@ export async function mergeVideoAudioBuffers(
   audioBuffer: Buffer,
   audioMime: string,
   timeoutMs: number,
-  logger?: Logger
+  logger?: Logger,
+  knownDurationSec?: number
 ): Promise<Buffer | null> {
   const ffmpeg = await resolveFfmpegBinary()
   if (!ffmpeg) {
@@ -338,6 +339,29 @@ export async function mergeVideoAudioBuffers(
     await writeFile(videoPath, videoBuffer)
     await writeFile(audioPath, audioBuffer)
 
+    // Use known duration from API if available, otherwise probe the video file
+    let dynamicTimeoutMs = timeoutMs
+    let durationSec: number | null = knownDurationSec && knownDurationSec > 0 ? knownDurationSec : null
+
+    if (durationSec) {
+      // Calculate dynamic timeout based on API-provided duration
+      const processingTimeMs = Math.max(30_000, Math.min(300_000, durationSec * 1000 / 3))
+      dynamicTimeoutMs = Math.max(timeoutMs, processingTimeMs)
+      logger?.warn(`[social-media-parser] mergeVideoAudioBuffers: using timeout ${dynamicTimeoutMs}ms based on API duration ${durationSec}s`)
+    } else {
+      // Fallback to ffprobe if no API duration provided
+      const ffprobe = await resolveFfprobeBinary()
+      if (ffprobe) {
+        const probedDuration = await readVideoDuration(ffprobe, videoPath, 10_000)
+        if (probedDuration && probedDuration > 0) {
+          durationSec = probedDuration
+          const processingTimeMs = Math.max(30_000, Math.min(300_000, probedDuration * 1000 / 3))
+          dynamicTimeoutMs = Math.max(timeoutMs, processingTimeMs)
+          logger?.warn(`[social-media-parser] mergeVideoAudioBuffers: video duration ${probedDuration}s (probed), using timeout ${dynamicTimeoutMs}ms`)
+        }
+      }
+    }
+
     logger?.warn(`[social-media-parser] mergeVideoAudioBuffers: ffmpeg available, merging...`)
 
     await runCommand(
@@ -353,7 +377,7 @@ export async function mergeVideoAudioBuffers(
         '-map', '1:a:0',
         outputPath,
       ],
-      timeoutMs
+      dynamicTimeoutMs
     )
 
     const buffer = await readFile(outputPath)

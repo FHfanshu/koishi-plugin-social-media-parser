@@ -25,6 +25,13 @@ export interface NetworkConfig {
   cooldownMs: number
 }
 
+export interface VideoCacheConfig {
+  enabled: boolean
+  ttlMs: number
+  maxSizeBytes: number
+  maxEntries: number
+}
+
 export interface MediaConfig {
   maxBytes: number
   maxVideoBytes: number
@@ -32,6 +39,7 @@ export interface MediaConfig {
   sendMode: SendMode
   videoSendMode: VideoSendMode
   fallbackToUrlOnError: boolean
+  videoCache: VideoCacheConfig
 }
 
 export interface DouyinConfig {
@@ -123,6 +131,13 @@ export interface Config {
   debug: boolean
 }
 
+export const DEFAULT_VIDEO_CACHE_CONFIG: VideoCacheConfig = {
+  enabled: true,
+  ttlMs: 30 * 60 * 1000,
+  maxSizeBytes: 200 * 1024 * 1024,
+  maxEntries: 20,
+}
+
 export const DEFAULT_MEDIA_INJECT_CONFIG: MediaInjectConfig = {
   enabled: true,
   maxImages: 3,
@@ -135,7 +150,7 @@ export const DEFAULT_MEDIA_INJECT_CONFIG: MediaInjectConfig = {
   longVideoMaxFrames: 12,
   keepAudio: true,
   maxTotalBytes: 10 * 1024 * 1024,
-  ffmpegTimeoutMs: 30_000,
+  ffmpegTimeoutMs: 120_000, // 2 minutes default, will be dynamically adjusted based on video duration
 }
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -159,6 +174,12 @@ export const Config: Schema<Config> = Schema.intersect([
         Schema.const('url').description('直接发送视频直链（最省流量，但平台兼容性最差）')
       ]).default('base64').description('视频发送模式'),
       fallbackToUrlOnError: Schema.boolean().default(true).description('下载/发送失败时允许回退到直链（OneBot 下的非 url 视频模式不会回退）'),
+      videoCache: Schema.object({
+        enabled: Schema.boolean().default(true).description('启用视频缓存（同一视频在多个群解析时复用已下载内容）'),
+        ttlMs: Schema.number().default(30 * 60 * 1000).min(60_000).max(24 * 60 * 60 * 1000).description('缓存有效期（毫秒，默认30分钟）'),
+        maxSizeBytes: Schema.number().default(200 * 1024 * 1024).min(10 * 1024 * 1024).max(1024 * 1024 * 1024).description('最大缓存内存（bytes，默认200MB）'),
+        maxEntries: Schema.number().default(20).min(1).max(100).description('最大缓存条目数'),
+      }).description('视频缓存设置'),
     }).description('媒体与发送设置'),
   }).description('网络与媒体设置'),
   Schema.object({
@@ -250,7 +271,12 @@ export function migrateConfig(rawConfig: unknown): MigrationResult {
   const migrated: Record<string, any> = {
     ...source,
     network: isRecord(source.network) ? { ...source.network } : {},
-    media: isRecord(source.media) ? { ...source.media } : {},
+    media: isRecord(source.media)
+      ? {
+          ...source.media,
+          videoCache: isRecord(source.media.videoCache) ? { ...source.media.videoCache } : {},
+        }
+      : { videoCache: {} },
     autoParse: isRecord(source.autoParse)
       ? {
           ...source.autoParse,

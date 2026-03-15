@@ -46,8 +46,12 @@ function mimeToExt(mime: string): string {
   if (mime.includes('gif')) return 'gif'
   if (mime.includes('mp4')) return 'mp4'
   if (mime.includes('webm')) return 'webm'
+  if (mime.includes('mov')) return 'mov'
   if (mime.includes('ogg')) return 'ogg'
   if (mime.includes('mp3') || mime.includes('mpeg')) return 'mp3'
   if (mime.includes('aac')) return 'aac'
+  if (mime.includes('m4a') || mime.includes('audio/mp4')) return 'm4a'
+  // For video streams without clear mime type, default to mp4
+  if (mime.includes('video/')) return 'mp4'
   return 'bin'
 }
