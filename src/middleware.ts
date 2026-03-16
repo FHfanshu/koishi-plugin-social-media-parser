@@ -10,6 +10,11 @@ const COOLDOWN_MIN_TTL_MS = 60_000
 const COOLDOWN_MAX_ENTRIES = 5_000
 const COOLDOWN_CLEANUP_INTERVAL_MS = 30_000
 
+// Message deduplication: prevent the same message from being processed multiple times
+// This handles cases where OneBot/Koishi may re-deliver messages due to network issues
+const MESSAGE_ID_TTL_MS = 120_000 // 2 minutes TTL for message IDs
+const MESSAGE_ID_MAX_ENTRIES = 10_000
+
 export function registerAutoParseMiddleware(
   ctx: Context,
   config: Config,
@@ -19,6 +24,9 @@ export function registerAutoParseMiddleware(
 
   // Lazy cleanup: only run periodically, not on every message
   let lastCleanupTime = 0
+
+  // Message ID deduplication set
+  const processedMessageIds = new Map<string, number>()
 
   ctx.middleware(async (session, next) => {
     if (!config.autoParse.enabled) {
@@ -49,7 +57,23 @@ export function registerAutoParseMiddleware(
     const now = Date.now()
     if (now - lastCleanupTime > COOLDOWN_CLEANUP_INTERVAL_MS) {
       cleanupCooldownMap(cooldownMap, now, config.network.cooldownMs)
+      cleanupMessageIdMap(processedMessageIds, now)
       lastCleanupTime = now
+    }
+
+    // Check if this message has already been processed (deduplication)
+    // This prevents duplicate parsing when the same message is re-delivered
+    const messageId = session.messageId
+    if (messageId) {
+      const messageKey = `${session.channelId || session.guildId || session.userId}:${messageId}`
+      if (processedMessageIds.has(messageKey)) {
+        if (config.debug) {
+          logger.info(`auto parse skipped: duplicate message id=${messageId}`)
+        }
+        return next()
+      }
+      // Mark this message as processed
+      processedMessageIds.set(messageKey, now)
     }
 
     if (isUserBlocked(session, config.autoParse.blacklist.users)) {
@@ -153,6 +177,30 @@ function cleanupCooldownMap(cooldownMap: Map<string, number>, now: number, coold
   const overflow = cooldownMap.size - COOLDOWN_MAX_ENTRIES
   for (let i = 0; i < overflow; i += 1) {
     cooldownMap.delete(ordered[i][0])
+  }
+}
+
+function cleanupMessageIdMap(messageIdMap: Map<string, number>, now: number): void {
+  if (messageIdMap.size === 0) {
+    return
+  }
+
+  // Remove expired message IDs
+  for (const [key, timestamp] of messageIdMap) {
+    if (now - timestamp > MESSAGE_ID_TTL_MS) {
+      messageIdMap.delete(key)
+    }
+  }
+
+  // If still too large, remove oldest entries
+  if (messageIdMap.size <= MESSAGE_ID_MAX_ENTRIES) {
+    return
+  }
+
+  const ordered = [...messageIdMap.entries()].sort((a, b) => a[1] - b[1])
+  const overflow = messageIdMap.size - MESSAGE_ID_MAX_ENTRIES
+  for (let i = 0; i < overflow; i += 1) {
+    messageIdMap.delete(ordered[i][0])
   }
 }
 

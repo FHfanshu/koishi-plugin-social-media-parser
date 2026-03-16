@@ -64,31 +64,35 @@ export async function sendParsedContent(
     && config.forward.autoMergeForward
     && mediaFileCount > 1
 
+  // Build image segments first (fast operation)
+  const imageSegments = imageUrls.length > 0
+    ? await buildImageSegments(ctx, imageUrls, config, logger)
+    : []
+
+  // If there's a video, process it in background while sending images/text first
   if (parsed.videos.length > 0) {
     const primaryVideo = parsed.videos[0]
+
+    // Send text/images immediately (don't wait for video)
+    const shouldForwardVideo = isOneBot && config.forward.enabled
+
+    if (shouldForwardVideo) {
+      const forwardResult = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
+      if (forwardResult !== 'full') {
+        await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
+      } else {
+        await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
+      }
+    } else {
+      await sendIntroPlain(session, intro)
+      await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
+    }
+
+    // Now process and send video (potentially slow)
     const result = await buildVideoElement(ctx, primaryVideo, parsed, config, logger, isOneBot)
 
     if (result.success) {
-      const { element } = result
-      const imageSegments = imageUrls.length > 0
-        ? await buildImageSegments(ctx, imageUrls, config, logger)
-        : []
-      const shouldForwardVideo = isOneBot && config.forward.enabled
-
-      if (shouldForwardVideo) {
-        const forwardResult = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
-        if (forwardResult !== 'full') {
-          await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
-        } else {
-          await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
-        }
-        await session.send(element)
-      } else {
-        await sendIntroPlain(session, intro)
-        await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
-        await session.send(element)
-      }
-
+      await session.send(result.element)
       return
     }
 
@@ -100,11 +104,11 @@ export async function sendParsedContent(
       await session.send(skipMessage)
     }
     logger.info(`video unavailable: ${JSON.stringify(reason)}`)
-    // Continue to send images/text as fallback
+    return
   }
 
+  // No video, send images/text normally
   if (imageUrls.length > 0) {
-    const imageSegments = await buildImageSegments(ctx, imageUrls, config, logger)
     const shouldForwardImages = isOneBot && config.forward.enabled
 
     if (shouldForwardImages) {
@@ -421,12 +425,13 @@ async function mergeVideoAudio(
   }
 
   try {
+    const dashMergeMaxBytes = Math.max(config.media.maxBytes, config.media.maxVideoBytes || config.media.maxBytes)
     const audio = await downloadBuffer(ctx, audioUrl, config.network.timeoutMs, {
       headers: {
         referer: 'https://www.bilibili.com/',
         accept: '*/*',
       },
-      maxBytes: config.media.maxBytes,
+      maxBytes: dashMergeMaxBytes,
     })
 
     const merged = await mergeVideoAudioBuffers(

@@ -17,7 +17,9 @@ export interface DownloadOptions {
 }
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-const TRUSTED_PUBLIC_MEDIA_HOST_RE = /(^|\.)((twimg\.com)|(x\.com)|(twitter\.com)|(t\.co))$/i
+// Trusted public media CDN hosts that bypass Koishi's isLocal check
+// These are known CDN domains that may resolve to various IPs but are safe public resources
+const TRUSTED_PUBLIC_MEDIA_HOST_RE = /(^|\.)(xhscdn\.com|sns-webvideo-qc\.xhscdn\.com|sns-bak-.*\.xhscdn\.com|bilivideo\.cn|bilivideo\.com|.*\.bilivideo\.cn|.*\.bilivideo\.com|.*\.mcdn\.bilivideo\.cn|douyinvod\.com|.*\.douyinvod\.com|iesdouyin\.com|.*\.iesdouyin\.com|v\.douyin\.com|twimg\.com|x\.com|twitter\.com|t\.co)$/i
 
 export async function resolveRedirect(
   ctx: Context,

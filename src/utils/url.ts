@@ -26,6 +26,60 @@ const XIAOHONGSHU_HOST_RE = /(^|\.)((xiaohongshu\.com)|(xhslink\.com))$/i
 const BILIBILI_HOST_RE = /(^|\.)((bilibili\.com)|(b23\.tv)|(bili22\.cn)|(bili23\.cn)|(bili33\.cn)|(bili2233\.cn))$/i
 const TWITTER_HOST_RE = /(^|\.)((x\.com)|(twitter\.com)|(mobile\.x\.com)|(mobile\.twitter\.com)|(m\.twitter\.com)|(t\.co)|(fxtwitter\.com)|(vxtwitter\.com))$/i
 
+// B站小程序分享卡片中常见的URL字段名
+const BILIBILI_CARD_URL_FIELDS = ['qqdocurl', 'jumpUrl', 'jump_url', 'url', 'link', 'src']
+
+/**
+ * 尝试从分享卡片JSON中提取URL
+ * 支持 B站小程序卡片等格式，提取 qqdocurl、jumpUrl 等字段
+ */
+function tryExtractUrlsFromCardJson(raw: string): string[] {
+  const urls: string[] = []
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return urls
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return urls
+  }
+
+  // 递归提取URL字段
+  const visited = new Set<unknown>()
+  const extract = (obj: unknown): void => {
+    if (!obj || typeof obj !== 'object' || visited.has(obj)) {
+      return
+    }
+    visited.add(obj)
+
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        extract(item)
+      }
+      return
+    }
+
+    // 检查已知的URL字段名
+    for (const field of BILIBILI_CARD_URL_FIELDS) {
+      const value = (obj as Record<string, unknown>)[field]
+      if (typeof value === 'string' && value.startsWith('http')) {
+        urls.push(value)
+      }
+    }
+
+    // 递归子对象
+    for (const key of Object.keys(obj as Record<string, unknown>)) {
+      extract((obj as Record<string, unknown>)[key])
+    }
+  }
+
+  extract(parsed)
+  return urls
+}
+
 export function decodeHtmlEntities(value: string): string {
   if (!value || !value.includes('&')) {
     return value
@@ -219,12 +273,18 @@ export function extractSocialUrlsFromSession(session: Session): string[] {
         continue
       }
 
-      // 分享卡片直接用正则匹配URL
+      // 分享卡片：尝试解析JSON提取特定字段，再fallback到正则
       if (element.type === 'json' || element.type === 'xml' || element.type === 'app') {
         const raw = element.attrs?.data ?? element.attrs?.content ?? element.data?.data ?? element.data?.content
         if (typeof raw === 'string') {
-          // 直接用正则提取，不尝试JSON解析
-          urls.push(...extractCandidateUrls(decodeEscapedUrl(decodeHtmlEntities(raw))))
+          const decoded = decodeEscapedUrl(decodeHtmlEntities(raw))
+          // 尝试解析JSON提取特定字段（B站小程序卡片等）
+          const extractedFromJson = tryExtractUrlsFromCardJson(decoded)
+          if (extractedFromJson.length > 0) {
+            urls.push(...extractedFromJson)
+          }
+          // fallback: 用正则提取
+          urls.push(...extractCandidateUrls(decoded))
         }
       } else {
         // 其他元素类型递归提取
