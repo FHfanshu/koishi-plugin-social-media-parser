@@ -26,6 +26,9 @@ type VideoBuildResult =
 
 // Module-level video cache manager (set by the plugin)
 let videoCacheManager: VideoCacheManager | null = null
+const RECENT_VIDEO_SEND_TTL_MS = 90_000
+const RECENT_VIDEO_SEND_MAX_ENTRIES = 1_000
+const recentVideoSends = new Map<string, number>()
 
 /**
  * Set the video cache manager instance.
@@ -92,6 +95,13 @@ export async function sendParsedContent(
     const result = await buildVideoElement(ctx, primaryVideo, parsed, config, logger, isOneBot)
 
     if (result.success) {
+      if (shouldSkipRecentVideoSend(session, parsed)) {
+        if (config.debug) {
+          logger.info(`skip duplicate video send in ttl window: ${parsed.resolvedUrl || parsed.originalUrl}`)
+        }
+        return
+      }
+      rememberRecentVideoSend(session, parsed)
       await session.send(result.element)
       return
     }
@@ -699,7 +709,12 @@ async function sendForwardNodes(
     }
 
     if (forwardResult === 'timeout') {
-      // Fall through to koishi native forward instead of returning true
+      // The underlying OneBot request may still complete after timeout.
+      // For media-rich forward nodes, immediate fallback can cause duplicate sends.
+      if (hasMediaForwardNode(safeNodes)) {
+        logger.warn('forward onebot api timeout with media nodes, skip fallback to avoid duplicate sends')
+        return true
+      }
       logger.warn('forward onebot api timeout, falling back to koishi native forward')
     }
 
@@ -714,6 +729,21 @@ async function sendForwardNodes(
     logger.info(`forward send failed (koishi-native): ${String((error as Error)?.message || error)}`)
     return false
   }
+}
+
+function hasMediaForwardNode(nodes: any[]): boolean {
+  for (const node of nodes) {
+    if (!node || typeof node !== 'object') {
+      continue
+    }
+
+    const children = Array.isArray(node.children) ? node.children : []
+    const onebotSegments = toOneBotSegments(children)
+    if (onebotSegments.some((segment) => segment?.type && segment.type !== 'text')) {
+      return true
+    }
+  }
+  return false
 }
 
 type OneBotForwardResult = 'sent' | 'timeout' | 'failed'
@@ -1376,4 +1406,46 @@ function findPreferredBreakPoint(text: string, start: number, end: number): numb
 
 function isPreferredBreakChar(char: string): boolean {
   return /\s/.test(char) || /[.,!?;:)\]}]/.test(char)
+}
+
+function getRecentVideoSendKey(session: Session, parsed: ParsedContent): string {
+  const target = session.channelId || session.guildId || session.userId || 'unknown'
+  const source = parsed.resolvedUrl || parsed.originalUrl || ''
+  return `${session.platform}:${target}:${source}`
+}
+
+function cleanupRecentVideoSends(now: number): void {
+  if (!recentVideoSends.size) {
+    return
+  }
+
+  for (const [key, timestamp] of recentVideoSends) {
+    if (now - timestamp > RECENT_VIDEO_SEND_TTL_MS) {
+      recentVideoSends.delete(key)
+    }
+  }
+
+  if (recentVideoSends.size <= RECENT_VIDEO_SEND_MAX_ENTRIES) {
+    return
+  }
+
+  const ordered = [...recentVideoSends.entries()].sort((a, b) => a[1] - b[1])
+  const overflow = recentVideoSends.size - RECENT_VIDEO_SEND_MAX_ENTRIES
+  for (let i = 0; i < overflow; i += 1) {
+    recentVideoSends.delete(ordered[i][0])
+  }
+}
+
+function shouldSkipRecentVideoSend(session: Session, parsed: ParsedContent): boolean {
+  const now = Date.now()
+  cleanupRecentVideoSends(now)
+  const key = getRecentVideoSendKey(session, parsed)
+  const timestamp = recentVideoSends.get(key)
+  return typeof timestamp === 'number' && now - timestamp <= RECENT_VIDEO_SEND_TTL_MS
+}
+
+function rememberRecentVideoSend(session: Session, parsed: ParsedContent): void {
+  const now = Date.now()
+  cleanupRecentVideoSends(now)
+  recentVideoSends.set(getRecentVideoSendKey(session, parsed), now)
 }

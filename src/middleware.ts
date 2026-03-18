@@ -14,6 +14,8 @@ const COOLDOWN_CLEANUP_INTERVAL_MS = 30_000
 // This handles cases where OneBot/Koishi may re-deliver messages due to network issues
 const MESSAGE_ID_TTL_MS = 120_000 // 2 minutes TTL for message IDs
 const MESSAGE_ID_MAX_ENTRIES = 10_000
+const RECENT_SENDER_URL_TTL_MS = 90_000
+const RECENT_SENDER_URL_MAX_ENTRIES = 15_000
 
 export function registerAutoParseMiddleware(
   ctx: Context,
@@ -27,6 +29,8 @@ export function registerAutoParseMiddleware(
 
   // Message ID deduplication set
   const processedMessageIds = new Map<string, number>()
+  // Sender+URL dedupe: protects against repeated WS delivery with different message IDs
+  const recentSenderUrlMap = new Map<string, number>()
 
   ctx.middleware(async (session, next) => {
     if (!config.autoParse.enabled) {
@@ -53,11 +57,15 @@ export function registerAutoParseMiddleware(
       return next()
     }
 
+    const sessionScopeKey = resolveSessionScopeKey(session)
+    const senderId = typeof session.userId === 'string' && session.userId ? session.userId : 'unknown'
+
     // Periodic cleanup instead of per-message
     const now = Date.now()
     if (now - lastCleanupTime > COOLDOWN_CLEANUP_INTERVAL_MS) {
       cleanupCooldownMap(cooldownMap, now, config.network.cooldownMs)
       cleanupMessageIdMap(processedMessageIds, now)
+      cleanupRecentSenderUrlMap(recentSenderUrlMap, now)
       lastCleanupTime = now
     }
 
@@ -65,7 +73,7 @@ export function registerAutoParseMiddleware(
     // This prevents duplicate parsing when the same message is re-delivered
     const messageId = session.messageId
     if (messageId) {
-      const messageKey = `${session.channelId || session.guildId || session.userId}:${messageId}`
+      const messageKey = `${sessionScopeKey}:${messageId}`
       if (processedMessageIds.has(messageKey)) {
         if (config.debug) {
           logger.info(`auto parse skipped: duplicate message id=${messageId}`)
@@ -105,16 +113,31 @@ export function registerAutoParseMiddleware(
         continue
       }
 
-      const cooldownKey = `${session.channelId || session.guildId || session.userId}:${url}`
-      const lastTime = cooldownMap.get(cooldownKey) ?? 0
-      if (Date.now() - lastTime < config.network.cooldownMs) {
+      const canonicalUrlKey = normalizeUrlForDedup(url)
+      const senderUrlKey = `${sessionScopeKey}:${senderId}:${canonicalUrlKey}`
+      const nowBySender = Date.now()
+      const senderLastTime = recentSenderUrlMap.get(senderUrlKey) ?? 0
+      if (nowBySender - senderLastTime < RECENT_SENDER_URL_TTL_MS) {
         if (config.debug) {
-          logger.info(`auto parse cooldown hit: ${url}`)
+          logger.info(`auto parse skipped duplicate sender+url in ttl: ${url}`)
         }
         continue
       }
+      // Mark before parse to avoid concurrent duplicate send; clear on parse/send failure.
+      recentSenderUrlMap.set(senderUrlKey, nowBySender)
 
-      cooldownMap.set(cooldownKey, Date.now())
+      const cooldownKey = `${sessionScopeKey}:${canonicalUrlKey}`
+      const cooldownNow = Date.now()
+      const lastTime = cooldownMap.get(cooldownKey) ?? 0
+      if (cooldownNow - lastTime < config.network.cooldownMs) {
+        if (config.debug) {
+          logger.info(`auto parse cooldown hit: ${url}`)
+        }
+        recentSenderUrlMap.delete(senderUrlKey)
+        continue
+      }
+
+      cooldownMap.set(cooldownKey, cooldownNow)
       if (config.debug) {
         logger.info(`auto parse start: ${url}`)
       }
@@ -131,8 +154,36 @@ export function registerAutoParseMiddleware(
         }
         resolvedSet.add(resolvedKey)
 
+        const resolvedCanonicalKey = normalizeUrlForDedup(resolvedKey)
+        const resolvedCooldownKey = `${sessionScopeKey}:${resolvedCanonicalKey}`
+        if (resolvedCooldownKey !== cooldownKey) {
+          const resolvedLastTime = cooldownMap.get(resolvedCooldownKey) ?? 0
+          const resolvedNow = Date.now()
+          if (resolvedNow - resolvedLastTime < config.network.cooldownMs) {
+            if (config.debug) {
+              logger.info(`auto parse cooldown hit by resolved url: ${resolvedKey} (from ${url})`)
+            }
+            continue
+          }
+          cooldownMap.set(resolvedCooldownKey, resolvedNow)
+        }
+
+        const resolvedSenderUrlKey = `${sessionScopeKey}:${senderId}:${resolvedCanonicalKey}`
+        if (resolvedSenderUrlKey !== senderUrlKey) {
+          const resolvedSenderLast = recentSenderUrlMap.get(resolvedSenderUrlKey) ?? 0
+          const resolvedSenderNow = Date.now()
+          if (resolvedSenderNow - resolvedSenderLast < RECENT_SENDER_URL_TTL_MS) {
+            if (config.debug) {
+              logger.info(`auto parse skipped duplicate sender+resolvedUrl in ttl: ${resolvedKey} (from ${url})`)
+            }
+            continue
+          }
+          recentSenderUrlMap.set(resolvedSenderUrlKey, resolvedSenderNow)
+        }
+
         await sendParsedContent(ctx, session, parsed, config, logger)
       } catch (error) {
+        recentSenderUrlMap.delete(senderUrlKey)
         const message = (error as Error)?.message || String(error)
 
         if (isDisabledParseError(message)) {
@@ -181,26 +232,99 @@ function cleanupCooldownMap(cooldownMap: Map<string, number>, now: number, coold
 }
 
 function cleanupMessageIdMap(messageIdMap: Map<string, number>, now: number): void {
-  if (messageIdMap.size === 0) {
+  cleanupTimedMap(messageIdMap, now, MESSAGE_ID_TTL_MS, MESSAGE_ID_MAX_ENTRIES)
+}
+
+function cleanupRecentSenderUrlMap(senderUrlMap: Map<string, number>, now: number): void {
+  cleanupTimedMap(senderUrlMap, now, RECENT_SENDER_URL_TTL_MS, RECENT_SENDER_URL_MAX_ENTRIES)
+}
+
+function cleanupTimedMap(timedMap: Map<string, number>, now: number, ttlMs: number, maxEntries: number): void {
+  if (timedMap.size === 0) {
     return
   }
 
-  // Remove expired message IDs
-  for (const [key, timestamp] of messageIdMap) {
-    if (now - timestamp > MESSAGE_ID_TTL_MS) {
-      messageIdMap.delete(key)
+  for (const [key, timestamp] of timedMap) {
+    if (now - timestamp > ttlMs) {
+      timedMap.delete(key)
     }
   }
 
-  // If still too large, remove oldest entries
-  if (messageIdMap.size <= MESSAGE_ID_MAX_ENTRIES) {
+  if (timedMap.size <= maxEntries) {
     return
   }
 
-  const ordered = [...messageIdMap.entries()].sort((a, b) => a[1] - b[1])
-  const overflow = messageIdMap.size - MESSAGE_ID_MAX_ENTRIES
+  const ordered = [...timedMap.entries()].sort((a, b) => a[1] - b[1])
+  const overflow = timedMap.size - maxEntries
   for (let i = 0; i < overflow; i += 1) {
-    messageIdMap.delete(ordered[i][0])
+    timedMap.delete(ordered[i][0])
+  }
+}
+
+function resolveSessionScopeKey(session: {
+  platform?: unknown
+  guildId?: unknown
+  channelId?: unknown
+  userId?: unknown
+}): string {
+  const platform = typeof session.platform === 'string' && session.platform
+    ? session.platform
+    : 'unknown'
+  const guildId = typeof session.guildId === 'string' ? session.guildId : ''
+  const channelId = typeof session.channelId === 'string' ? session.channelId : ''
+  const userId = typeof session.userId === 'string' ? session.userId : ''
+  const scope = guildId || channelId || userId || 'unknown'
+  return `${platform}:${scope}`
+}
+
+function normalizeUrlForDedup(url: string): string {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    const path = parsed.pathname.replace(/\/+$/, '')
+
+    if (host.endsWith('xiaohongshu.com') || host.endsWith('xhslink.com')) {
+      const noteMatch = path.match(/\/(?:discovery\/item|explore|item|note|notes|post|detail)\/([^/?#]+)/i)
+      if (noteMatch?.[1]) {
+        return `xhs:${noteMatch[1]}`
+      }
+    }
+
+    if (host.endsWith('douyin.com') || host.endsWith('iesdouyin.com')) {
+      const workMatch = path.match(/\/(?:video|note)\/([a-zA-Z0-9]+)/i)
+      if (workMatch?.[1]) {
+        return `douyin:${workMatch[1]}`
+      }
+    }
+
+    if (
+      host.endsWith('bilibili.com')
+      || host.endsWith('b23.tv')
+      || host.endsWith('bili22.cn')
+      || host.endsWith('bili23.cn')
+      || host.endsWith('bili33.cn')
+      || host.endsWith('bili2233.cn')
+    ) {
+      const bvMatch = path.match(/\/(BV[a-zA-Z0-9]+)/i)
+      if (bvMatch?.[1]) {
+        return `bili:${bvMatch[1].toUpperCase()}`
+      }
+      const avMatch = path.match(/\/av(\d+)/i)
+      if (avMatch?.[1]) {
+        return `bili:av${avMatch[1]}`
+      }
+    }
+
+    if (host.endsWith('x.com') || host.endsWith('twitter.com') || host.endsWith('t.co')) {
+      const tweetMatch = path.match(/\/status\/(\d+)/i)
+      if (tweetMatch?.[1]) {
+        return `x:${tweetMatch[1]}`
+      }
+    }
+
+    return `${host}${path}`
+  } catch {
+    return url
   }
 }
 
