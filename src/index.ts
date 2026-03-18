@@ -6,6 +6,7 @@ import { Config, migrateConfig } from './config'
 import type { Config as PluginConfig } from './config'
 import { registerParseCommand } from './command'
 import { registerAutoParseMiddleware } from './middleware'
+import { registerSocialMediaTool } from './tool'
 import { setFfmpegPaths } from './utils/compress'
 import { setVideoCacheManager } from './utils/media'
 import { getVideoCacheManager } from './utils/video-cache'
@@ -124,6 +125,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   registerParseCommand(ctx, resolvedConfig)
   registerAutoParseMiddleware(ctx, resolvedConfig, cooldownMap)
+  ctx.inject(['chatluna'], (innerCtx) => {
+    registerSocialMediaTool(innerCtx, resolvedConfig)
+  })
   ctx.inject(['console'], (innerCtx) => {
     const packageBase = path.resolve(ctx.baseDir, 'node_modules/koishi-plugin-social-media-parser')
     const entry = process.env.KOISHI_BASE

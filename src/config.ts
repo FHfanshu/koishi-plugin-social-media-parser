@@ -115,6 +115,12 @@ export interface ForwardConfig {
   maxForwardNodes: number
 }
 
+export interface ToolConfig {
+  enabled: boolean
+  name: string
+  description: string
+}
+
 export interface AutoParseConfig {
   enabled: boolean
   onlyGroup: boolean
@@ -130,6 +136,7 @@ export interface Config {
   media: MediaConfig
   platforms: PlatformsConfig
   forward: ForwardConfig
+  tool: ToolConfig
   autoParse: AutoParseConfig
   debug: boolean
 }
@@ -261,6 +268,13 @@ export const Config: Schema<Config> = Schema.intersect([
       textChunkSize: Schema.number().default(280).min(80).max(1_000).description('合并转发模式下文本分片长度'),
       maxForwardNodes: Schema.number().default(25).min(5).max(80).description('单次合并转发最多节点数'),
     }).description('转发消息设置'),
+    tool: Schema.object({
+      enabled: Schema.boolean().default(true).description('注册 ChatLuna 工具'),
+      name: Schema.string().default('read_social_media').description('工具名称'),
+      description: Schema.string()
+        .default('读取抖音/小红书/B站/Twitter(X) 链接并返回结构化内容。')
+        .description('工具描述'),
+    }).description('ChatLuna 工具设置'),
   }).description('自动解析与转发设置'),
   Schema.object({
     debug: Schema.boolean().default(false).description('输出调试日志'),
@@ -289,6 +303,7 @@ export function migrateConfig(rawConfig: unknown): MigrationResult {
           blacklist: isRecord(source.autoParse.blacklist) ? { ...source.autoParse.blacklist } : {},
         }
       : { blacklist: {} },
+    tool: isRecord(source.tool) ? { ...source.tool } : {},
     platforms: isRecord(source.platforms)
       ? {
           ...source.platforms,
