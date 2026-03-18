@@ -33,7 +33,7 @@ export const name = 'social-media-parser'
 
 export const inject = {
   required: ['http'],
-  optional: ['chatluna', 'chatluna_storage', 'ffmpeg', 'console'],
+  optional: ['chatluna', 'chatluna_storage', 'ffmpeg', 'console', 'puppeteer'],
 } as const
 
 export const usage = `

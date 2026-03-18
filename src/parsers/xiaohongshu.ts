@@ -3,8 +3,80 @@ import { load } from 'js-yaml'
 
 import type { Config } from '../config'
 import type { ParsedContent } from '../types'
+import { NetworkError, ParseError, RateLimitError, VerifyError, detectVerifyRequirement } from '../utils/errors'
 import { requestText, resolveRedirect } from '../utils/http'
+import { withRetry } from '../utils/retry'
 import { normalizeInputUrl } from '../utils/url'
+
+/**
+ * Puppeteer service interface (partial)
+ */
+interface PuppeteerService {
+  page?: () => Promise<PuppeteerPage>
+}
+
+interface PuppeteerPage {
+  goto: (url: string, options?: { waitUntil?: string; timeout?: number }) => Promise<void>
+  content: () => Promise<string>
+  close: () => Promise<void>
+  waitForSelector: (selector: string, options?: { timeout?: number }) => Promise<void>
+  waitForTimeout: (ms: number) => Promise<void>
+  setViewport: (viewport: { width: number; height: number }) => Promise<void>
+  setUserAgent: (userAgent: string) => Promise<void>
+  evaluate: (fn: () => void) => Promise<void>
+  cookies: () => Promise<Array<{ name: string; value: string }>>
+  setCookie: (...cookies: Array<{ name: string; value: string; domain?: string; path?: string }>) => Promise<void>
+}
+
+/**
+ * Cache for xsec_token to reduce verification triggers.
+ * Token is valid for a limited time and tied to a specific note.
+ */
+interface TokenCacheEntry {
+  token: string
+  expiresAt: number
+}
+
+const XSEC_TOKEN_CACHE = new Map<string, TokenCacheEntry>()
+const TOKEN_CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
+
+// Modern browser headers to avoid detection
+const XHS_BROWSER_HEADERS = {
+  'sec-ch-ua': '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"macOS"',
+} as const
+
+/**
+ * Parse cookie string into puppeteer cookie format.
+ * Supports two formats:
+ * - Single line with semicolon: "a1=xxx; web_session=xxx"
+ * - Multiple lines (one per line): "a1=xxx\nweb_session=xxx"
+ */
+function parseCookieString(cookieStr: string): Array<{ name: string; value: string; domain: string }> {
+  if (!cookieStr || !cookieStr.trim()) {
+    return []
+  }
+
+  // Split by newline first, then by semicolon (handle both formats)
+  const lines = cookieStr.split(/[\n;]/)
+
+  return lines
+    .map((line) => {
+      const trimmed = line.trim()
+      const eqIdx = trimmed.indexOf('=')
+      if (eqIdx <= 0) {
+        return null
+      }
+      const name = trimmed.slice(0, eqIdx).trim()
+      const value = trimmed.slice(eqIdx + 1).trim()
+      if (!name || !value) {
+        return null
+      }
+      return { name, value, domain: '.xiaohongshu.com' }
+    })
+    .filter((c): c is { name: string; value: string; domain: string } => c !== null)
+}
 
 export async function parseXiaohongshu(
   ctx: Context,
@@ -22,19 +94,15 @@ export async function parseXiaohongshu(
   logger.info(`xhs canonical url: ${canonicalUrl}`)
   const html = await fetchHtml(ctx, canonicalUrl, config, logger)
   const state = parseInitialState(html)
+  const note = state ? extractNoteFromState(state) : null
 
-  if (!state) {
+  if (!state || !note) {
     // Debug: log why parsing failed
     const hasScript = html.includes('__INITIAL_STATE__')
     const hasCaptcha = html.includes('验证') || html.includes('captcha') || html.includes('slider')
-    logger.warn(`xhs parse failed: hasScript=${hasScript}, hasCaptcha=${hasCaptcha}, htmlLen=${html.length}`)
+    logger.warn(`xhs parse failed: hasState=${Boolean(state)}, hasNote=${Boolean(note)}, hasScript=${hasScript}, hasCaptcha=${hasCaptcha}, htmlLen=${html.length}`)
     throw new Error('提取小红书初始数据失败')
   }
-
-  // Extract note data using the same path as chatluna-social-media-reader
-  const note = deepGet(state, ['noteData', 'data', 'noteData'])
-    || deepGet(state, ['note', 'noteDetailMap', '[-1]', 'note'])
-    || {}
 
   const title = String(deepGet(note, ['title']) || '未命名笔记')
   const content = String(deepGet(note, ['desc']) || '')
@@ -50,6 +118,7 @@ export async function parseXiaohongshu(
   return {
     platform: 'xiaohongshu',
     title,
+    author,
     content,
     images,
     videos,
@@ -58,7 +127,6 @@ export async function parseXiaohongshu(
     resolvedUrl: canonicalUrl,
     extra: {
       noteId,
-      author,
       type: noteType,
       stats,
     },
@@ -92,14 +160,172 @@ function toCanonicalXiaohongshuUrl(input: string): string {
   }
 }
 
+/**
+ * Fetch HTML using browser (puppeteer) to bypass anti-bot verification.
+ * This is more reliable but consumes more resources.
+ */
+async function fetchHtmlWithBrowser(
+  ctx: Context,
+  url: string,
+  config: Config,
+  logger: Logger
+): Promise<string> {
+  const puppeteer = (ctx as Context & { puppeteer?: PuppeteerService }).puppeteer
+  if (!puppeteer || typeof puppeteer.page !== 'function') {
+    throw new Error('Puppeteer 服务不可用，请确保已安装 koishi-plugin-puppeteer')
+  }
+
+  const timeout = config.platforms.xiaohongshu.browserTimeout
+  const userAgent = config.platforms.xiaohongshu.userAgent
+  logger.info(`xhs using browser mode, url=${url}, timeout=${timeout}`)
+
+  const page = await puppeteer.page()
+  if (!page) {
+    throw new Error('无法创建 Puppeteer 页面')
+  }
+
+  try {
+    // Set viewport to look like a real desktop browser
+    await page.setViewport({ width: 1920, height: 1080 })
+
+    // Set user agent
+    await page.setUserAgent(userAgent)
+
+    // Set cookies if configured (must be done before any page visits)
+    const cookieStr = config.platforms.xiaohongshu.cookies
+    if (cookieStr && cookieStr.trim()) {
+      const cookies = parseCookieString(cookieStr)
+      if (cookies.length > 0) {
+        logger.info(`xhs browser: setting ${cookies.length} cookies`)
+        await page.setCookie(...cookies)
+      }
+    }
+
+    // Hide webdriver and automation flags
+    try {
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] } as any)
+        Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] })
+        // Hide Chrome automation flag
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(window as any).chrome = { runtime: {} }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const originalQuery = (window.navigator as any).permissions.query
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(window.navigator as any).permissions.query = (parameters: any) =>
+          parameters.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : originalQuery(parameters)
+      })
+    } catch (e) {
+      logger.debug(`xhs browser mode: failed to inject stealth scripts: ${e}`)
+    }
+
+    // First visit homepage to establish session/cookies
+    logger.debug('xhs browser: visiting homepage first')
+    try {
+      await page.goto('https://www.xiaohongshu.com', {
+        waitUntil: 'domcontentloaded',
+        timeout: Math.min(timeout, 15000),
+      })
+      // Random delay to simulate human behavior
+      await sleep(500 + Math.random() * 500)
+    } catch (e) {
+      logger.debug(`xhs browser: homepage visit error (continuing): ${e}`)
+    }
+
+    // Now navigate to the target page
+    logger.debug(`xhs browser: navigating to target URL`)
+    await page.goto(url, {
+      waitUntil: 'networkidle2',
+      timeout,
+    })
+
+    // Wait for content to load
+    try {
+      await page.waitForSelector('script', { timeout: 5000 })
+    } catch {
+      // Continue even if selector not found
+    }
+
+    // Small delay to ensure JS execution
+    await sleep(300)
+
+    // Get the page content
+    const html = await page.content()
+
+    if (!html || typeof html !== 'string') {
+      throw new NetworkError('xiaohongshu', '浏览器模式返回空页面')
+    }
+
+    // Check for verification requirement
+    const verifyError = detectVerifyRequirement('xiaohongshu', html)
+    if (verifyError) {
+      if (!hasUsableNoteData(html)) {
+        logger.warn(`xhs browser mode still hit verification: ${verifyError.verifyType}`)
+        throw verifyError
+      }
+      logger.info('xhs browser mode: verify keyword detected but note data exists, continue parsing')
+    }
+
+    logger.info(`xhs browser mode success, htmlLen=${html.length}`)
+    return html
+  } finally {
+    await page.close()
+  }
+}
+
 async function fetchHtml(
   ctx: Context,
   url: string,
   config: Config,
   logger: Logger
 ): Promise<string> {
-  // More complete browser headers to avoid detection
-  const headers = {
+  // If browser mode is enabled and puppeteer is available, use it first
+  if (config.platforms.xiaohongshu.useBrowser) {
+    const puppeteer = (ctx as Context & { puppeteer?: PuppeteerService }).puppeteer
+    if (puppeteer && typeof puppeteer.page === 'function') {
+      try {
+        return await fetchHtmlWithBrowser(ctx, url, config, logger)
+      } catch (error) {
+        // Log the error but don't throw yet - fall back to HTTP mode
+        logger.warn(`xhs browser mode failed, falling back to HTTP: ${String((error as Error)?.message || error)}`)
+      }
+    } else {
+      logger.warn('xhs browser mode enabled but puppeteer service not available, falling back to HTTP')
+    }
+  }
+
+  // Extract note ID for token cache lookup
+  const noteId = extractNoteId(url)
+
+  // Check for cached token
+  let cachedToken: string | undefined
+  if (noteId) {
+    const cached = XSEC_TOKEN_CACHE.get(noteId)
+    if (cached && Date.now() < cached.expiresAt) {
+      cachedToken = cached.token
+    }
+  }
+
+  // Build URL with cached token if available
+  let fetchUrl = url
+  if (cachedToken) {
+    try {
+      const parsed = new URL(url)
+      if (!parsed.searchParams.has('xsec_token')) {
+        parsed.searchParams.set('xsec_token', cachedToken)
+        parsed.searchParams.set('xsec_source', 'pc_user')
+        fetchUrl = parsed.toString()
+        logger.debug(`xhs using cached xsec_token for ${noteId}`)
+      }
+    } catch {
+      // ignore URL parse errors
+    }
+  }
+
+  // Complete browser headers including sec-ch-ua series
+  const headers: Record<string, string> = {
     'user-agent': config.platforms.xiaohongshu.userAgent,
     'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
@@ -112,26 +338,85 @@ async function fetchHtml(
     'sec-fetch-user': '?1',
     'upgrade-insecure-requests': '1',
     'referer': 'https://www.xiaohongshu.com/',
+    ...XHS_BROWSER_HEADERS,
+  }
+
+  const fetchPage = async (): Promise<string> => {
+    const html = await requestText(ctx, fetchUrl, config.network.timeoutMs, headers)
+    if (!html || typeof html !== 'string') {
+      throw new NetworkError('xiaohongshu', '空页面响应')
+    }
+
+    // Check for verification requirement
+    const verifyError = detectVerifyRequirement('xiaohongshu', html)
+    if (verifyError) {
+      if (!hasUsableNoteData(html)) {
+        logger.warn(`xhs verification detected: ${verifyError.verifyType}`)
+        throw verifyError
+      }
+      logger.info('xhs verification keyword detected but note data exists, continue parsing')
+    }
+
+    return html
   }
 
   let lastError: unknown
+
   for (let attempt = 1; attempt <= config.platforms.xiaohongshu.maxRetries; attempt += 1) {
     try {
-      const html = await requestText(ctx, url, config.network.timeoutMs, headers)
-      if (!html || typeof html !== 'string') {
-        throw new Error('空页面响应')
+      const html = await fetchPage()
+
+      // Try to cache xsec_token from response URL or content
+      if (noteId) {
+        cacheTokenFromHtml(noteId, html, logger)
       }
+
       return html
     } catch (error) {
       lastError = error
+      const isVerifyError = error instanceof VerifyError
+
+      // Don't retry on verification errors
+      if (isVerifyError) {
+        throw error
+      }
+
       logger.info(`xhs fetch failed (${attempt}/${config.platforms.xiaohongshu.maxRetries}): ${String((error as Error)?.message || error)}`)
+
       if (attempt < config.platforms.xiaohongshu.maxRetries) {
-        await sleep(attempt * 300)
+        // Exponential backoff: 300ms, 600ms, 1200ms, ...
+        const delay = attempt * 300 * Math.pow(1.5, attempt - 1)
+        await sleep(delay)
       }
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error('抓取小红书页面失败')
+  throw lastError instanceof Error ? lastError : new NetworkError('xiaohongshu', '抓取小红书页面失败')
+}
+
+/**
+ * Extract and cache xsec_token from HTML content.
+ */
+function cacheTokenFromHtml(noteId: string, html: string, logger: Logger): void {
+  try {
+    // Try to extract token from __INITIAL_STATE__
+    const match = html.match(/__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/)
+    if (match) {
+      const state = JSON.parse(match[1])
+      const token = state?.note?.noteDetailMap?.['-1']?.note?.xsec_token
+        || state?.noteData?.data?.noteData?.xsec_token
+
+      if (token && typeof token === 'string') {
+        XSEC_TOKEN_CACHE.set(noteId, {
+          token,
+          expiresAt: Date.now() + TOKEN_CACHE_TTL_MS,
+        })
+        logger.debug(`xhs cached xsec_token for ${noteId}`)
+      }
+    }
+  } catch {
+    // Ignore parse errors
+  }
 }
 
 function parseInitialState(html: string): Record<string, any> | null {
@@ -157,6 +442,48 @@ function parseInitialState(html: string): Record<string, any> | null {
   } catch {
     return null
   }
+}
+
+function hasUsableNoteData(html: string): boolean {
+  const state = parseInitialState(html)
+  if (!state) {
+    return false
+  }
+
+  const note = extractNoteFromState(state)
+  return Boolean(note)
+}
+
+function extractNoteFromState(state: Record<string, any>): Record<string, any> | null {
+  const noteData = deepGet(state, ['noteData', 'data', 'noteData'])
+  if (noteData && typeof noteData === 'object') {
+    return noteData as Record<string, any>
+  }
+
+  const noteDetailMap = deepGet(state, ['note', 'noteDetailMap'])
+  if (noteDetailMap && typeof noteDetailMap === 'object') {
+    const map = noteDetailMap as Record<string, unknown>
+
+    const preferred = map['-1']
+    if (preferred && typeof preferred === 'object') {
+      const note = deepGet(preferred, ['note'])
+      if (note && typeof note === 'object') {
+        return note as Record<string, any>
+      }
+    }
+
+    for (const entry of Object.values(map)) {
+      if (!entry || typeof entry !== 'object') {
+        continue
+      }
+      const note = deepGet(entry, ['note'])
+      if (note && typeof note === 'object') {
+        return note as Record<string, any>
+      }
+    }
+  }
+
+  return null
 }
 
 function deepGet(data: unknown, keys: string[]): unknown {

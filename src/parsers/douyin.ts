@@ -2,7 +2,9 @@ import type { Context, Logger } from 'koishi'
 
 import type { Config } from '../config'
 import type { ParsedContent } from '../types'
+import { NetworkError, NotFoundError, ParseError } from '../utils/errors'
 import { requestText, resolveRedirect } from '../utils/http'
+import { withRetry } from '../utils/retry'
 
 interface DouyinVideoMedia {
   kind: 'video'
@@ -106,6 +108,7 @@ function parseDouyinPayload(payload: any, inputUrl: string, config: Config, logg
     return {
       platform: 'douyin',
       title: media.title,
+      author: media.author,
       content: '',
       images: [],
       videos: [media.url],
@@ -115,7 +118,6 @@ function parseDouyinPayload(payload: any, inputUrl: string, config: Config, logg
       resolvedUrl,
       extra: {
         awemeId,
-        author: media.author,
         kind: 'video',
         stats: media.stats,
       },
@@ -125,6 +127,7 @@ function parseDouyinPayload(payload: any, inputUrl: string, config: Config, logg
   return {
     platform: 'douyin',
     title: media.title,
+    author: media.author,
     content: '',
     images: media.urls,
     videos: [],
@@ -133,7 +136,6 @@ function parseDouyinPayload(payload: any, inputUrl: string, config: Config, logg
     resolvedUrl,
     extra: {
       awemeId,
-      author: media.author,
       kind: 'images',
       stats: media.stats,
     },
@@ -175,7 +177,22 @@ async function fetchHybridPayload(
   for (let index = 0; index < attempts.length; index += 1) {
     const current = attempts[index]
     try {
-      const payload = await fetchJson(ctx, current.endpoint, timeoutMs)
+      const payload = await withRetry(
+        () => fetchJson(ctx, current.endpoint, timeoutMs),
+        {
+          maxRetries: 2,
+          baseDelayMs: 1500,
+          shouldRetry: (err) => {
+            const msg = err.message.toLowerCase()
+            return msg.includes('network') || msg.includes('timeout') || msg.includes('empty')
+          },
+          onRetry: (attempt, err) => {
+            if (debugEnabled) {
+              logger.info(`douyin hybrid retry ${attempt}: ${err.message}; endpoint=${current.endpoint}`)
+            }
+          },
+        }
+      )
       const code = toNumber(payload?.code)
 
       if (code && code >= 400) {
@@ -183,14 +200,14 @@ async function fetchHybridPayload(
         if (debugEnabled) {
           logger.info(`douyin hybrid rejected (${code}): ${reason || 'unknown reason'}; endpoint=${current.endpoint}`)
         }
-        lastError = new Error(reason || `code=${code}`)
+        lastError = new ParseError('api_error', 'douyin', reason || `code=${code}`)
         continue
       }
 
       return payload
     } catch (error) {
       const message = (error as Error)?.message || String(error)
-      lastError = error instanceof Error ? error : new Error(message)
+      lastError = error instanceof Error ? error : new NetworkError('douyin', message)
       if (debugEnabled) {
         logger.info(`douyin hybrid request failed: ${message}; endpoint=${current.endpoint}`)
       }
@@ -201,7 +218,7 @@ async function fetchHybridPayload(
     }
   }
 
-  throw lastError || new Error('抖音解析请求失败')
+  throw lastError || new NetworkError('douyin', '抖音解析请求失败')
 }
 
 function pickMediaFromHybrid(root: any, inputUrl: string, config: Config, logger: Logger): DouyinMedia {

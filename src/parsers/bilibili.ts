@@ -4,12 +4,60 @@ import type { Context, Logger } from 'koishi'
 
 import type { Config } from '../config'
 import type { ParsedContent } from '../types'
+import { NetworkError, NotFoundError, ParseError, RateLimitError } from '../utils/errors'
 import { requestText, resolveRedirect } from '../utils/http'
+import { withRetry } from '../utils/retry'
 import { isSafePublicHttpUrl } from '../utils/url'
 
 const BVID_RE = /BV[0-9a-zA-Z]{10}/i
 const AVID_RE = /(?:^|[^a-zA-Z0-9])av(\d+)/i
 const BILIBILI_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+// Bilibili 非视频链接路径（专栏/直播/动态/相簿等）
+const BILIBILI_NON_VIDEO_PATHS = [
+  '/read/',      // 专栏
+  '/opus/',      // 动态 (新版)
+  '/dynamic/',   // 动态 (旧版)
+  '/v/topic/',   // 话题
+  '/space/',     // 用户空间
+  '/member/',    // 会员中心
+  '/account/',   // 账号相关
+  '/bangumi/',   // 番剧
+  '/cheese/',    // 课程
+  '/blackboard/', // 活动
+  '/audio/',     // 音频
+  '/medialist/', // 收藏夹
+  '/list/',      // 播放列表
+]
+
+function isBilibiliNonVideoUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    const path = parsed.pathname.toLowerCase()
+
+    // 直播链接
+    if (host === 'live.bilibili.com' || host.endsWith('.live.bilibili.com')) {
+      return true
+    }
+
+    // t.bilibili.com 是动态短链
+    if (host === 't.bilibili.com') {
+      return true
+    }
+
+    // 检查非视频路径
+    for (const nonVideoPath of BILIBILI_NON_VIDEO_PATHS) {
+      if (path.startsWith(nonVideoPath)) {
+        return true
+      }
+    }
+
+    return false
+  } catch {
+    return false
+  }
+}
 
 // WBI mixin key index (from B站)
 const WBI_MIXIN_INDEX = [
@@ -94,7 +142,18 @@ export async function parseBilibili(
   config: Config,
   logger: Logger
 ): Promise<ParsedContent> {
+  // 跳过非视频链接（专栏/直播/动态等），静默处理
+  if (isBilibiliNonVideoUrl(inputUrl)) {
+    throw new Error('该类型链接解析已禁用。')
+  }
+
   const finalUrl = await resolveRedirect(ctx, inputUrl, config.network.timeoutMs, logger)
+
+  // 跳过重定向后的非视频链接
+  if (isBilibiliNonVideoUrl(finalUrl)) {
+    throw new Error('该类型链接解析已禁用。')
+  }
+
   const directId = extractVideoId(inputUrl)
   const videoId = directId || extractVideoId(finalUrl)
   const page = extractPageNo(finalUrl) || extractPageNo(inputUrl) || 1
@@ -168,12 +227,35 @@ async function fetchVideoDetail(
     ? `bvid=${encodeURIComponent(videoId.value)}`
     : `aid=${encodeURIComponent(videoId.value)}`
   const endpoint = `https://api.bilibili.com/x/web-interface/view?${query}`
-  const payload = await requestJson(ctx, endpoint, config.network.timeoutMs, logger)
+
+  const payload = await withRetry(
+    () => requestJson(ctx, endpoint, config.network.timeoutMs, logger),
+    {
+      maxRetries: 2,
+      baseDelayMs: 1000,
+      shouldRetry: (err) => {
+        const msg = err.message.toLowerCase()
+        return msg.includes('network') || msg.includes('timeout') || msg.includes('empty')
+      },
+      onRetry: (attempt, err) => {
+        logger.info(`bilibili video detail retry ${attempt}: ${err.message}`)
+      },
+    }
+  )
 
   const code = toNumber(payload?.code)
+  if (code === -404 || code === 404) {
+    throw new NotFoundError('bilibili', '视频不存在或已被删除')
+  }
+  if (code === -400 || code === 400) {
+    throw new NotFoundError('bilibili', '视频 ID 无效')
+  }
+  if (code === -503 || code === 503) {
+    throw new RateLimitError('bilibili', 'B站服务暂时不可用')
+  }
   if (code !== 0 || !payload?.data) {
     const reason = typeof payload?.message === 'string' ? payload.message : `code=${code}`
-    throw new Error(`Bilibili 元数据获取失败：${reason}`)
+    throw new ParseError('api_error', 'bilibili', `Bilibili 元数据获取失败：${reason}`)
   }
 
   const data = payload.data
@@ -378,6 +460,8 @@ async function getWbiMixinKey(ctx: Context, config: Config, logger: Logger): Pro
   if (!cache.pending) {
     cache.pending = (async () => {
       let lastError = ''
+
+      // 方案1: 通过 nav 接口
       for (let i = 0; i < 3; i++) {
         try {
           const payload = await requestJson(ctx, 'https://api.bilibili.com/x/web-interface/nav', config.network.timeoutMs, logger)
@@ -404,6 +488,37 @@ async function getWbiMixinKey(ctx: Context, config: Config, logger: Logger): Pro
           }
         }
       }
+
+      // 方案2: 从首页 HTML 提取
+      try {
+        const html = await requestText(ctx, 'https://www.bilibili.com/', config.network.timeoutMs, {
+          'user-agent': BILIBILI_UA,
+          'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        })
+        // 尝试从 __INITIAL_STATE__ 中提取
+        const match = html.match(/__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/)
+        if (match) {
+          const state = JSON.parse(match[1])
+          const wbi = state?.wbi?.img
+          if (wbi) {
+            const img = asString(wbi.img_url)
+            const sub = asString(wbi.sub_url)
+            const imgKey = img.split('/').pop()?.split('.')[0] || ''
+            const subKey = sub.split('/').pop()?.split('.')[0] || ''
+            const raw = `${imgKey}${subKey}`
+            const mixin = WBI_MIXIN_INDEX.map(idx => raw[idx]).join('').slice(0, 32)
+            if (mixin && mixin.length >= 32) {
+              cache.value = mixin
+              cache.expiresAt = Date.now() + 10 * 60 * 1000
+              logger.debug('WBI key extracted from homepage HTML')
+              return mixin
+            }
+          }
+        }
+      } catch (err) {
+        logger.debug(`WBI fallback from HTML failed: ${(err as Error)?.message}`)
+      }
+
       if (cache.value) {
         logger.warn(`WBI refresh failed, using cached value: ${lastError}`)
         return cache.value
@@ -424,16 +539,22 @@ async function fetchVideoViaThirdParty(
   config: Config,
   logger: Logger
 ): Promise<string> {
-  // xingzhige
+  // Try xingzhige first (most reliable)
   const xingzhigeUrl = await fetchVideoViaXingzhige(ctx, bilibiliUrl, config, logger)
   if (xingzhigeUrl) {
     return xingzhigeUrl
   }
 
-  // injahow
+  // Try injahow
   const injahowUrl = await fetchVideoViaInjahow(ctx, detail, config, logger)
   if (injahowUrl) {
     return injahowUrl
+  }
+
+  // Try bilibili.ii1.fun (new fallback)
+  const ii1funUrl = await fetchVideoViaIi1Fun(ctx, bilibiliUrl, config, logger)
+  if (ii1funUrl) {
+    return ii1funUrl
   }
 
   return ''
@@ -501,6 +622,35 @@ async function fetchVideoViaInjahow(
     return ''
   } catch (err) {
     logger.debug(`injahow request failed: ${(err as Error)?.message}`)
+    return ''
+  }
+}
+
+async function fetchVideoViaIi1Fun(
+  ctx: Context,
+  bilibiliUrl: string,
+  config: Config,
+  logger: Logger
+): Promise<string> {
+  const endpoint = `https://bilibili.ii1.fun/api/video?url=${encodeURIComponent(bilibiliUrl)}`
+
+  try {
+    const payload = await requestJson(ctx, endpoint, config.network.timeoutMs, logger)
+    // ii1.fun returns data.url for video
+    const videoUrl = normalizeResourceUrl(asString(payload?.data?.url || payload?.url).trim())
+
+    if (videoUrl) {
+      if (!isSafePublicHttpUrl(videoUrl) || !isTrustedBilibiliVideoUrl(videoUrl)) {
+        logger.warn(`ii1.fun url blocked by safety policy: ${videoUrl}`)
+        return ''
+      }
+      return videoUrl
+    }
+
+    logger.debug(`ii1.fun unavailable: no video url in response`)
+    return ''
+  } catch (err) {
+    logger.debug(`ii1.fun request failed: ${(err as Error)?.message}`)
     return ''
   }
 }

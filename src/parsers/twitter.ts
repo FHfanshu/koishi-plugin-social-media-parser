@@ -2,7 +2,9 @@ import type { Context, Logger } from 'koishi'
 
 import type { Config } from '../config'
 import type { ParsedContent, TwitterProvider } from '../types'
+import { NetworkError, NotFoundError, ParseError, RateLimitError } from '../utils/errors'
 import { requestText, resolveRedirect } from '../utils/http'
+import { withRetry } from '../utils/retry'
 import { isSafePublicHttpUrl } from '../utils/url'
 
 const TWEET_ID_RE = /(?:^|\/)status(?:es)?\/(\d{6,25})(?:$|[/?#])/i
@@ -281,10 +283,34 @@ async function fetchFxTwitterResult(
   }
 
   const endpoint = `https://api.fxtwitter.com/status/${encodeURIComponent(tweetId)}`
-  const text = await requestText(ctx, endpoint, config.network.timeoutMs, {
-    accept: 'application/json,text/plain,*/*',
-  }).catch((error) => {
-    logger.warn(`twitter fxtwitter request failed: ${String((error as Error)?.message || error)}`)
+
+  const fetchWithRetry = async (): Promise<string> => {
+    return withRetry(
+      () => requestText(ctx, endpoint, config.network.timeoutMs, {
+        accept: 'application/json,text/plain,*/*',
+      }),
+      {
+        maxRetries: 3,
+        baseDelayMs: 5000,
+        shouldRetry: (err) => {
+          const msg = err.message.toLowerCase()
+          return (
+            msg.includes('429')
+            || msg.includes('rate limit')
+            || msg.includes('timeout')
+            || msg.includes('network')
+            || msg.includes('empty')
+          )
+        },
+        onRetry: (attempt, err, delay) => {
+          logger.info(`twitter fxtwitter retry ${attempt} (delay=${Math.round(delay)}ms): ${err.message}`)
+        },
+      }
+    )
+  }
+
+  const text = await fetchWithRetry().catch((error) => {
+    logger.warn(`twitter fxtwitter request failed after retries: ${String((error as Error)?.message || error)}`)
     return ''
   })
 

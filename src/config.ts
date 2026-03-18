@@ -58,6 +58,9 @@ export interface XiaohongshuConfig {
   maxRetries: number
   maxImages: number
   autoParseBlockedGuilds: string[]
+  useBrowser: boolean
+  browserTimeout: number
+  cookies: string
 }
 
 export interface BilibiliConfig {
@@ -199,6 +202,9 @@ export const Config: Schema<Config> = Schema.intersect([
         maxRetries: Schema.number().default(3).min(1).max(6).description('抓取失败重试次数'),
         maxImages: Schema.number().default(20).min(1).max(40).description('图文最多保留图片数量'),
         autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（仅小红书，支持 platform:guildId）'),
+        useBrowser: Schema.boolean().default(false).description('使用浏览器模式绕过反爬验证（需要 puppeteer 服务）'),
+        browserTimeout: Schema.number().default(30000).min(5000).max(120000).description('浏览器模式超时时间（毫秒）'),
+        cookies: Schema.string().role('textarea').default('').description('小红书登录 cookie（每行一个，格式：a1=xxx 或 web_session=xxx）'),
       }).description('小红书解析设置'),
       bilibili: Schema.object({
         enabled: Schema.boolean().default(true).description('启用 Bilibili 解析'),

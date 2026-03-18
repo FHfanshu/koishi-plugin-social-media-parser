@@ -1116,6 +1116,10 @@ function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: 
   const originalText = parsed.content?.trim() ? truncateText(parsed.content.trim(), 350) : ''
   const translatedText = parsed.translatedContent?.trim() ? truncateText(parsed.translatedContent.trim(), 350) : ''
 
+  // 作者信息：B站显示UP主，小红书显示作者
+  const authorLabel = getAuthorLabel(parsed.platform)
+  const authorText = parsed.author ? `${authorLabel}：${parsed.author}` : ''
+
   if (parsed.platform === 'twitter' && translatedText) {
     const textPart = config.platforms.twitter.translation.showOriginal
       ? [
@@ -1126,6 +1130,7 @@ function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: 
 
     return [
       `【${platformName}解析】${parsed.title || '无标题'}`,
+      authorText,
       textPart,
       sourceUrl,
     ].filter(Boolean).join('\n\n')
@@ -1133,9 +1138,23 @@ function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: 
 
   return [
     `【${platformName}解析】${parsed.title || '无标题'}`,
+    authorText,
     originalText,
     sourceUrl,
   ].filter(Boolean).join('\n\n')
+}
+
+function getAuthorLabel(platform: ParsedContent['platform']): string {
+  switch (platform) {
+    case 'bilibili':
+      return 'UP主'
+    case 'xiaohongshu':
+      return '作者'
+    case 'douyin':
+      return '作者'
+    default:
+      return '作者'
+  }
 }
 
 function dedupeUrls(urls: string[]): string[] {
@@ -1255,12 +1274,106 @@ function splitTextChunks(text: string, chunkSize: number): string[] {
   }
 
   const size = Math.max(80, chunkSize)
+  const tokens = tokenizeTextWithUrl(normalized)
+  const flattened = tokens.flatMap((token) => {
+    if (token.atomic || token.value.length <= size) {
+      return token
+    }
+    return splitPlainTextToken(token.value, size).map((value) => ({ value, atomic: false }))
+  })
+
   const chunks: string[] = []
-  let index = 0
-  while (index < normalized.length) {
-    chunks.push(normalized.slice(index, index + size))
-    index += size
+  let current = ''
+  const pushCurrent = () => {
+    if (current.trim()) {
+      chunks.push(current)
+    }
+    current = ''
   }
 
+  for (const token of flattened) {
+    if (!token.value) {
+      continue
+    }
+
+    if (!current) {
+      current = token.value
+      continue
+    }
+
+    if (current.length + token.value.length <= size) {
+      current += token.value
+      continue
+    }
+
+    pushCurrent()
+    current = token.value
+  }
+  pushCurrent()
+
   return chunks
+}
+
+function tokenizeTextWithUrl(text: string): Array<{ value: string, atomic: boolean }> {
+  const tokens: Array<{ value: string, atomic: boolean }> = []
+  const urlPattern = /https?:\/\/[^\s<>"'`]+/gi
+  let cursor = 0
+  let matched: RegExpExecArray | null
+
+  while ((matched = urlPattern.exec(text)) !== null) {
+    const value = matched[0]
+    const start = matched.index
+    const end = start + value.length
+
+    if (start > cursor) {
+      tokens.push({ value: text.slice(cursor, start), atomic: false })
+    }
+    tokens.push({ value, atomic: true })
+    cursor = end
+  }
+
+  if (cursor < text.length) {
+    tokens.push({ value: text.slice(cursor), atomic: false })
+  }
+
+  return tokens
+}
+
+function splitPlainTextToken(text: string, size: number): string[] {
+  const parts: string[] = []
+  let cursor = 0
+
+  while (cursor < text.length) {
+    const remaining = text.length - cursor
+    if (remaining <= size) {
+      parts.push(text.slice(cursor))
+      break
+    }
+
+    const windowEnd = cursor + size
+    const breakPoint = findPreferredBreakPoint(text, cursor, windowEnd)
+    if (breakPoint <= cursor) {
+      parts.push(text.slice(cursor, windowEnd))
+      cursor = windowEnd
+      continue
+    }
+
+    parts.push(text.slice(cursor, breakPoint))
+    cursor = breakPoint
+  }
+
+  return parts
+}
+
+function findPreferredBreakPoint(text: string, start: number, end: number): number {
+  for (let index = end - 1; index > start; index--) {
+    if (isPreferredBreakChar(text[index])) {
+      return index + 1
+    }
+  }
+  return -1
+}
+
+function isPreferredBreakChar(char: string): boolean {
+  return /\s/.test(char) || /[.,!?;:)\]}]/.test(char)
 }
