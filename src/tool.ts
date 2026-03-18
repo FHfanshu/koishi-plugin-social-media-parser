@@ -82,7 +82,8 @@ class SocialMediaParserTool extends StructuredTool<any> {
 export function registerSocialMediaTool(ctx: Context, config: Config): void {
   const logger = ctx.logger('social-media-parser')
 
-  if (!config.tool?.enabled) {
+  const enabled = config.tool?.enabled !== false
+  if (!enabled) {
     logger.info('[tool] read_social_media disabled by config')
     return
   }
@@ -93,9 +94,9 @@ export function registerSocialMediaTool(ctx: Context, config: Config): void {
     return
   }
 
-  const toolName = sanitizeToolName(config.tool.name, 'read_social_media')
+  const toolName = sanitizeToolName(config.tool?.name, 'read_social_media')
   const toolDescription = sanitizeToolDescription(
-    config.tool.description,
+    config.tool?.description,
     '读取抖音/小红书/B站/Twitter(X) 链接并返回结构化信息与媒体资源链接。',
   )
 

@@ -16,6 +16,15 @@ const PLUGIN_NAMES = new Set([
   'koishi-plugin-social-media-parser',
 ])
 
+function isSocialMediaParserPluginName(name: string | undefined): boolean {
+  if (!name) return false
+  if (PLUGIN_NAMES.has(name)) return true
+  for (const pluginName of PLUGIN_NAMES) {
+    if (name.startsWith(`${pluginName}:`)) return true
+  }
+  return false
+}
+
 const NAV_GROUPS: NavGroup[] = [
   {
     title: '基础',
@@ -39,11 +48,12 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
-    title: '自动与转发',
+    title: '自动、转发与工具',
     sections: [
       { key: 'auto-forward', title: '自动解析与转发设置' },
       { key: 'auto-parse', title: '自动解析设置' },
       { key: 'forward', title: '转发消息设置' },
+      { key: 'tool', title: 'ChatLuna 工具设置' },
       { key: 'debug', title: '调试设置' },
     ],
   },
@@ -66,6 +76,7 @@ const SECTION_TITLE_ALIASES: Record<string, string[]> = {
   'auto-forward': ['自动解析与转发设置'],
   forward: ['转发消息设置'],
   'auto-parse': ['自动解析设置'],
+  tool: ['ChatLuna 工具设置', '工具设置'],
   debug: ['调试设置'],
 }
 
@@ -334,7 +345,7 @@ const SocialMediaParserDetailsLoader = defineComponent({
     const pluginName = inject<ComputedRef<string>>('plugin:name')
     const isOwn = computed(() => {
       const current = pluginName?.value
-      return !!current && PLUGIN_NAMES.has(current)
+      return isSocialMediaParserPluginName(current)
     })
 
     let dispose: (() => void) | null = null
