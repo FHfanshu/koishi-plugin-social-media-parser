@@ -74,7 +74,7 @@ export async function sendParsedContent(
 
   // If there's a video, process it in background while sending images/text first
   if (parsed.videos.length > 0) {
-    const primaryVideo = parsed.videos[0]
+    const videoCandidates = dedupeUrls(parsed.videos)
 
     // Send text/images immediately (don't wait for video)
     const shouldForwardVideo = isOneBot && config.forward.enabled
@@ -92,22 +92,39 @@ export async function sendParsedContent(
     }
 
     // Now process and send video (potentially slow)
-    const result = await buildVideoElement(ctx, primaryVideo, parsed, config, logger, isOneBot)
+    let lastFailureReason: VideoSkipReason | null = null
+    for (let index = 0; index < videoCandidates.length; index++) {
+      const videoUrl = videoCandidates[index]
+      if (config.debug && videoCandidates.length > 1) {
+        logger.info(`trying video candidate ${index + 1}/${videoCandidates.length}: ${videoUrl.slice(0, 120)}...`)
+      }
 
-    if (result.success) {
-      if (shouldSkipRecentVideoSend(session, parsed)) {
-        if (config.debug) {
-          logger.info(`skip duplicate video send in ttl window: ${parsed.resolvedUrl || parsed.originalUrl}`)
+      const result = await buildVideoElement(ctx, videoUrl, parsed, config, logger, isOneBot)
+
+      if (result.success) {
+        if (shouldSkipRecentVideoSend(session, parsed)) {
+          if (config.debug) {
+            logger.info(`skip duplicate video send in ttl window: ${parsed.resolvedUrl || parsed.originalUrl}`)
+          }
+          return
         }
+        rememberRecentVideoSend(session, parsed)
+        await session.send(result.element)
         return
       }
-      rememberRecentVideoSend(session, parsed)
-      await session.send(result.element)
-      return
+
+      const reason = (result as { success: false; reason: VideoSkipReason }).reason
+      lastFailureReason = reason
+      logger.info(`video candidate failed (${index + 1}/${videoCandidates.length}): ${reason.type}`)
+
+      // Duration limit is deterministic for all candidates, stop trying more.
+      if (reason.type === 'duration_exceeded') {
+        break
+      }
     }
 
     // Video build failed, send user-friendly message
-    const reason = (result as { success: false; reason: VideoSkipReason }).reason
+    const reason = lastFailureReason || ({ type: 'other', message: 'all_candidates_failed' } as VideoSkipReason)
     const skipMessage = buildVideoSkipMessage(reason, platformName, sourceUrl)
     if (skipMessage) {
       logger.info(`sending video skip message to user: ${skipMessage.split('\n')[0]}...`)

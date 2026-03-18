@@ -96,6 +96,8 @@ interface BilibiliVideoDetail {
 interface BilibiliPlayInfo {
   videoUrl: string
   audioUrl: string
+  videoUrls: string[]
+  audioUrls: string[]
   videoCodecid: number
   videoQuality: number
 }
@@ -173,21 +175,26 @@ export async function parseBilibili(
     : `https://www.bilibili.com/video/${detail.bvid}`
 
   let playInfo: BilibiliPlayInfo | null = null
-  let videoUrl = ''
-  let audioUrl = ''
+  let videoUrls: string[] = []
+  let audioUrls: string[] = []
 
   if (config.platforms.bilibili.fetchVideo) {
     // 优先使用官方 API (WBI 签名)
     playInfo = await fetchPlayInfoViaOfficialApi(ctx, detail, config, logger)
 
     if (playInfo?.videoUrl) {
-      videoUrl = playInfo.videoUrl
-      audioUrl = playInfo.audioUrl
+      videoUrls = playInfo.videoUrls.length > 0 ? playInfo.videoUrls : [playInfo.videoUrl]
+      audioUrls = playInfo.audioUrls.length > 0
+        ? playInfo.audioUrls
+        : (playInfo.audioUrl ? [playInfo.audioUrl] : [])
       logger.debug(`bilibili official api success: ${canonicalUrl}`)
     } else {
       // Fallback 到第三方 API
-      videoUrl = await fetchVideoViaThirdParty(ctx, detail, canonicalUrl, config, logger)
-      if (!videoUrl) {
+      const thirdPartyVideoUrl = await fetchVideoViaThirdParty(ctx, detail, canonicalUrl, config, logger)
+      if (thirdPartyVideoUrl) {
+        videoUrls = [thirdPartyVideoUrl]
+      }
+      if (videoUrls.length === 0) {
         logger.warn(`bilibili video direct link unavailable: ${canonicalUrl}`)
       }
     }
@@ -199,8 +206,8 @@ export async function parseBilibili(
     author: detail.owner || undefined,
     content: buildContent(detail, config.platforms.bilibili.maxDescLength),
     images: detail.cover ? [detail.cover] : [],
-    videos: videoUrl ? [videoUrl] : [],
-    audios: audioUrl ? [audioUrl] : [],
+    videos: videoUrls,
+    audios: audioUrls,
     videoDurationSec: detail.durationSec > 0 ? detail.durationSec : undefined,
     originalUrl: inputUrl,
     resolvedUrl: canonicalUrl,
@@ -373,17 +380,22 @@ function extractPlayInfoFromData(data: any, qn: number): BilibiliPlayInfo | null
 
   // 选择视频流
   let videoUrl = ''
+  let videoUrls: string[] = []
   let videoCodecid = 0
   let videoQuality = qn === 64 ? 720 : 480
 
   if (videos.length > 0) {
-    const sorted = videos.map((item: any) => ({
-      id: toNumber(item.id),
-      height: toNumber(item.height),
-      codecid: toNumber(item.codecid),
-      bandwidth: toNumber(item.bandwidth),
-      url: normalizeResourceUrl(asString(item.baseUrl || item.base_url)),
-    })).filter((item: any) => item.url).sort((a: any, b: any) => b.height - a.height)
+    const sorted = videos.map((item: any) => {
+      const urls = collectMediaUrls(item, ['baseUrl', 'base_url'], ['backupUrl', 'backup_url'])
+      return {
+        id: toNumber(item.id),
+        height: toNumber(item.height),
+        codecid: toNumber(item.codecid),
+        bandwidth: toNumber(item.bandwidth),
+        urls,
+        url: urls[0] || '',
+      }
+    }).filter((item: any) => item.url).sort((a: any, b: any) => b.height - a.height)
 
     // 按编码优先级选择: AV1 > HEVC > AVC
     const pickByCodec = (list: any[]) => {
@@ -404,7 +416,8 @@ function extractPlayInfoFromData(data: any, qn: number): BilibiliPlayInfo | null
         : pickByCodec(sorted.filter((item: any) => item.height <= 480)) || pickByCodec(sorted)
 
     if (picked) {
-      videoUrl = picked.url
+      videoUrls = filterTrustedBilibiliUrls(picked.urls)
+      videoUrl = videoUrls[0] || ''
       videoCodecid = picked.codecid
       videoQuality = picked.height >= 720 ? 720 : 480
     }
@@ -412,42 +425,46 @@ function extractPlayInfoFromData(data: any, qn: number): BilibiliPlayInfo | null
 
   // 选择音频流
   let audioUrl = ''
+  let audioUrls: string[] = []
   if (audios.length > 0) {
-    const audioSorted = audios.map((item: any) => ({
-      id: toNumber(item.id),
-      bandwidth: toNumber(item.bandwidth),
-      url: normalizeResourceUrl(asString(item.baseUrl || item.base_url)),
-    })).filter((item: any) => item.url).sort((a: any, b: any) => b.bandwidth - a.bandwidth)
+    const audioSorted = audios.map((item: any) => {
+      const urls = collectMediaUrls(item, ['baseUrl', 'base_url'], ['backupUrl', 'backup_url'])
+      return {
+        id: toNumber(item.id),
+        bandwidth: toNumber(item.bandwidth),
+        urls,
+        url: urls[0] || '',
+      }
+    }).filter((item: any) => item.url).sort((a: any, b: any) => b.bandwidth - a.bandwidth)
 
     if (audioSorted.length > 0) {
-      audioUrl = audioSorted[0].url
+      audioUrls = filterTrustedBilibiliUrls(audioSorted[0].urls)
+      audioUrl = audioUrls[0] || ''
     }
   }
 
   // 非DASH格式 (durl)
   if (!videoUrl && Array.isArray(data.durl)) {
     for (const item of data.durl) {
-      const candidate = normalizeResourceUrl(asString(item?.url))
-      if (candidate && isSafePublicHttpUrl(candidate) && isTrustedBilibiliVideoUrl(candidate)) {
-        videoUrl = candidate
+      const candidates = filterTrustedBilibiliUrls(collectMediaUrls(item, ['url'], ['backup_url', 'backupUrl']))
+      if (candidates.length > 0) {
+        videoUrls = candidates
+        videoUrl = candidates[0]
         break
       }
     }
   }
 
-  if (!videoUrl) {
+  if (!videoUrl || videoUrls.length === 0) {
     return null
   }
 
   // 安全检查
-  if (!isSafePublicHttpUrl(videoUrl) || !isTrustedBilibiliVideoUrl(videoUrl)) {
-    return null
-  }
-  if (audioUrl && (!isSafePublicHttpUrl(audioUrl) || !isTrustedBilibiliVideoUrl(audioUrl))) {
+  if (audioUrls.length === 0) {
     audioUrl = ''
   }
 
-  return { videoUrl, audioUrl, videoCodecid, videoQuality }
+  return { videoUrl, audioUrl, videoUrls, audioUrls, videoCodecid, videoQuality }
 }
 
 async function getWbiMixinKey(ctx: Context, config: Config, logger: Logger): Promise<string> {
@@ -807,6 +824,55 @@ function normalizeResourceUrl(url: string): string {
     return `https:${value}`
   }
   return value
+}
+
+function collectMediaUrls(
+  item: any,
+  primaryKeys: string[],
+  backupKeys: string[]
+): string[] {
+  const result: string[] = []
+  const seen = new Set<string>()
+
+  const pushIfValid = (input: unknown) => {
+    const normalized = normalizeResourceUrl(asString(input))
+    if (!normalized || seen.has(normalized)) {
+      return
+    }
+    seen.add(normalized)
+    result.push(normalized)
+  }
+
+  for (const key of primaryKeys) {
+    pushIfValid(item?.[key])
+  }
+
+  for (const key of backupKeys) {
+    const values = item?.[key]
+    if (Array.isArray(values)) {
+      for (const value of values) {
+        pushIfValid(value)
+      }
+    }
+  }
+
+  return result
+}
+
+function filterTrustedBilibiliUrls(urls: string[]): string[] {
+  const result: string[] = []
+  const seen = new Set<string>()
+  for (const url of urls) {
+    if (!url || seen.has(url)) {
+      continue
+    }
+    if (!isSafePublicHttpUrl(url) || !isTrustedBilibiliVideoUrl(url)) {
+      continue
+    }
+    seen.add(url)
+    result.push(url)
+  }
+  return result
 }
 
 function normalizeBvid(value: string): string {
