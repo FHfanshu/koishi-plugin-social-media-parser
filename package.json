@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-social-media-parser",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "description": "抖音、小红书、哔哩哔哩、Twitter(X) 解析插件，支持自动解析与手动命令",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
