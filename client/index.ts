@@ -88,71 +88,117 @@ function ensureStyle() {
   style.id = STYLE_ID
   style.textContent = `
 .social-media-parser-nav {
-  position: fixed;
-  top: 260px;
-  right: 60px;
+  position: absolute;
   z-index: 1000;
-  width: 150px;
+  width: 200px;
   max-width: 90vw;
+  max-height: 70vh;
+  background: var(--k-card-bg);
+  border-radius: 8px;
+  box-shadow: var(--k-card-shadow);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--k-card-border);
   user-select: none;
+  overflow: hidden;
+  transition: box-shadow 0.3s ease;
+}
+@media (max-width: 768px) {
+  .social-media-parser-nav { width: 160px; max-height: 50vh; }
+}
+.social-media-parser-nav:hover {
+  box-shadow: var(--k-card-shadow-hover, 0 4px 16px rgba(0,0,0,.15));
 }
 .social-media-parser-nav-header {
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--k-color-border, #4b5563);
-  background: color-mix(in srgb, var(--k-color-bg, #1f2937) 94%, white);
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--k-color-divider, #ebeef5);
+  background-color: var(--k-hover-bg);
   display: flex;
-  align-items: center;
   justify-content: space-between;
+  align-items: center;
   cursor: move;
-  touch-action: none;
+  transition: background-color 0.2s;
+}
+.social-media-parser-nav-header:hover {
+  background-color: var(--k-activity-bg);
 }
 .social-media-parser-nav-handle {
-  color: var(--k-text-light, #9ca3af);
-  font-size: 14px;
-  line-height: 1;
+  color: var(--k-text-light);
+  cursor: grab;
+  transition: color 0.2s;
+}
+.social-media-parser-nav-handle:active {
+  cursor: grabbing;
+  color: var(--k-color-primary);
 }
 .social-media-parser-nav-toggle {
   border: none;
   background: transparent;
-  color: var(--k-text-light, #9ca3af);
+  color: var(--k-text-light);
   cursor: pointer;
   padding: 0;
   font-size: 14px;
   line-height: 1;
+  display: flex;
+  align-items: center;
+  transition: transform 0.3s ease, color 0.2s;
+}
+.social-media-parser-nav-toggle:hover {
+  color: var(--k-text-active);
 }
 .social-media-parser-nav-body {
-  margin-top: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  overflow-y: auto;
+  padding: 4px 0;
+  transition: max-height 0.3s ease, opacity 0.3s ease;
+  opacity: 1;
 }
+.social-media-parser-nav-body::-webkit-scrollbar { width: 6px; }
+.social-media-parser-nav-body::-webkit-scrollbar-thumb { background: var(--k-scroll-thumb); border-radius: 3px; }
+.social-media-parser-nav-body::-webkit-scrollbar-track { background: transparent; }
 .social-media-parser-nav.collapsed .social-media-parser-nav-body {
-  display: none;
+  max-height: 0;
+  padding: 0;
+  opacity: 0;
+  overflow: hidden;
 }
-.social-media-parser-nav-item {
-  border: none;
-  background: transparent;
-  color: var(--k-text, #d1d5db);
-  text-align: left;
-  padding: 6px 4px;
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1.4;
+.social-media-parser-nav.collapsed .social-media-parser-nav-toggle {
+  transform: rotate(-90deg);
 }
-.social-media-parser-nav-item:hover {
-  color: var(--k-color-primary, #4f7cff);
+.social-media-parser-nav.collapsed .social-media-parser-nav-header {
+  border-bottom: none;
 }
-.social-media-parser-nav-item.active {
-  color: var(--k-color-primary, #4f7cff);
+.social-media-parser-nav-section {
+  margin-bottom: 4px;
 }
-.social-media-parser-nav-group {
-  margin-top: 4px;
-  padding: 6px 4px 2px;
+.social-media-parser-nav-section-title {
+  padding: 6px 12px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--k-text-light, #9ca3af);
-  opacity: 0.9;
+  color: var(--k-text-light);
+  background-color: var(--k-bg-light);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.social-media-parser-nav-item {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--k-text);
+  text-align: left;
+  padding: 5px 12px 5px 20px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.5;
+  transition: background-color 0.15s, color 0.15s;
+}
+.social-media-parser-nav-item:hover {
+  background-color: var(--k-hover-bg);
+  color: var(--k-text-active);
+}
+.social-media-parser-nav-item.active {
+  color: var(--k-color-primary);
+  background-color: var(--k-hover-bg);
 }
 `
   document.head.appendChild(style)
@@ -226,11 +272,14 @@ function mountFloatingNav() {
   root.innerHTML = `
 <div class="social-media-parser-nav-header">
   <span class="social-media-parser-nav-handle">⋮⋮</span>
-  <button class="social-media-parser-nav-toggle" type="button">⌄</button>
+  <button class="social-media-parser-nav-toggle" type="button">−</button>
 </div>
 <div class="social-media-parser-nav-body"></div>
 `
   document.body.appendChild(root)
+
+  root.style.top = '260px'
+  root.style.right = '60px'
 
   const body = root.querySelector<HTMLElement>('.social-media-parser-nav-body')!
   const toggle = root.querySelector<HTMLButtonElement>('.social-media-parser-nav-toggle')!
@@ -238,10 +287,13 @@ function mountFloatingNav() {
 
   const itemMap = new Map<string, HTMLButtonElement>()
   for (const group of NAV_GROUPS) {
-    const groupTitle = document.createElement('div')
-    groupTitle.className = 'social-media-parser-nav-group'
-    groupTitle.textContent = group.title
-    body.appendChild(groupTitle)
+    const sectionEl = document.createElement('div')
+    sectionEl.className = 'social-media-parser-nav-section'
+
+    const sectionTitle = document.createElement('div')
+    sectionTitle.className = 'social-media-parser-nav-section-title'
+    sectionTitle.textContent = group.title
+    sectionEl.appendChild(sectionTitle)
 
     for (const section of group.sections) {
       const button = document.createElement('button')
@@ -254,15 +306,16 @@ function mountFloatingNav() {
           target.scrollIntoView({ behavior: 'smooth', block: 'start' })
         }
       })
-      body.appendChild(button)
+      sectionEl.appendChild(button)
       itemMap.set(section.key, button)
     }
+    body.appendChild(sectionEl)
   }
 
   toggle.addEventListener('click', (event) => {
     event.stopPropagation()
     const collapsed = root.classList.toggle('collapsed')
-    toggle.textContent = collapsed ? '⌃' : '⌄'
+    toggle.textContent = collapsed ? '+' : '−'
   })
 
   let dragStartX = 0

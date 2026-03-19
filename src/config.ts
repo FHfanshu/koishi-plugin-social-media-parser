@@ -164,121 +164,159 @@ export const DEFAULT_MEDIA_INJECT_CONFIG: MediaInjectConfig = {
 }
 
 export const Config: Schema<Config> = Schema.intersect([
+  // ── 通用 ──────────────────────────────────────────────
+  Schema.object({
+    debug: Schema.boolean().default(false).description('调试模式（输出详细日志）'),
+  }).description('通用'),
+
+  // ── 网络 ──────────────────────────────────────────────
   Schema.object({
     network: Schema.object({
-      cooldownMs: Schema.number().default(8_000).description('同一链接冷却时间（毫秒）'),
-      timeoutMs: Schema.number().default(15_000).description('网络请求超时（毫秒）'),
-    }).description('网络设置'),
+      timeoutMs: Schema.number().default(15_000).description('请求超时（ms）'),
+      cooldownMs: Schema.number().default(8_000).description('同一链接冷却（ms）'),
+    }),
+  }).description('网络'),
+
+  // ── 媒体 ──────────────────────────────────────────────
+  Schema.object({
     media: Schema.object({
-      maxBytes: Schema.number().default(15 * 1024 * 1024).description('消息发送时单个媒体最大下载大小（bytes）'),
-      maxVideoBytes: Schema.number().default(512 * 1024 * 1024).min(8 * 1024 * 1024).max(2 * 1024 * 1024 * 1024).description('视频下载最大大小（bytes，用于时长探测与视频处理；建议大于 maxBytes）'),
-      maxDurationSec: Schema.number().default(1800).min(60).max(7200).description('视频最大时长（秒），超出则跳过解析。默认 1800 秒（30 分钟）'),
+      // 限制
+      maxBytes: Schema.number().default(15 * 1024 * 1024).description('单媒体最大下载量（bytes）'),
+      maxVideoBytes: Schema.number().default(512 * 1024 * 1024).min(8 * 1024 * 1024).max(2 * 1024 * 1024 * 1024).description('视频最大下载量（bytes，建议 > maxBytes）'),
+      maxDurationSec: Schema.number().default(1800).min(60).max(7200).description('视频最大时长（秒）'),
+      // 发送
       sendMode: Schema.union([
-        Schema.const('base64').description('下载后转 base64 发送（更稳定）'),
-        Schema.const('storage').description('下载后优先交给 chatluna storage service 托管；无 storage 时回退 base64'),
-        Schema.const('url').description('直接发送 URL（更省流量）')
-      ]).default('base64').description('消息发送模式'),
+        Schema.const('base64').description('base64 内联（最稳）'),
+        Schema.const('storage').description('chatluna storage 托管（无 storage 回退 base64）'),
+        Schema.const('url').description('直接 URL（最省流量）'),
+      ]).default('base64').description('图片发送模式'),
       videoSendMode: Schema.union([
-        Schema.const('storage').description('下载视频后优先交给 chatluna storage service 托管；无 storage 时回退 base64'),
-        Schema.const('base64').description('下载视频后使用 base64:// 发送（OneBot 更稳）'),
-        Schema.const('url').description('直接发送视频直链（最省流量，但平台兼容性最差）')
+        Schema.const('storage').description('chatluna storage 托管'),
+        Schema.const('base64').description('base64 内联（OneBot 较稳）'),
+        Schema.const('url').description('视频直链（兼容性最差）'),
       ]).default('base64').description('视频发送模式'),
-      fallbackToUrlOnError: Schema.boolean().default(true).description('下载/发送失败时允许回退到直链（OneBot 下的非 url 视频模式不会回退）'),
+      fallbackToUrlOnError: Schema.boolean().default(true).description('发送失败时回退到直链'),
+      // 缓存
       videoCache: Schema.object({
-        enabled: Schema.boolean().default(true).description('启用视频缓存（同一视频在多个群解析时复用已下载内容）'),
-        ttlMs: Schema.number().default(30 * 60 * 1000).min(60_000).max(24 * 60 * 60 * 1000).description('缓存有效期（毫秒，默认30分钟）'),
-        maxSizeBytes: Schema.number().default(200 * 1024 * 1024).min(10 * 1024 * 1024).max(1024 * 1024 * 1024).description('最大缓存内存（bytes，默认200MB）'),
-        maxEntries: Schema.number().default(20).min(1).max(100).description('最大缓存条目数'),
-      }).description('视频缓存设置'),
-    }).description('媒体与发送设置'),
-  }).description('网络与媒体设置'),
+        enabled: Schema.boolean().default(true).description('启用（同视频多群复用）'),
+        ttlMs: Schema.number().default(30 * 60 * 1000).min(60_000).max(24 * 60 * 60 * 1000).description('有效期（ms）'),
+        maxSizeBytes: Schema.number().default(200 * 1024 * 1024).min(10 * 1024 * 1024).max(1024 * 1024 * 1024).description('最大缓存（bytes）'),
+        maxEntries: Schema.number().default(20).min(1).max(100).description('最大条目数'),
+      }),
+    }),
+  }).description('媒体'),
+
+  // ── 平台：抖音 ────────────────────────────────────────
   Schema.object({
     platforms: Schema.object({
       douyin: Schema.object({
-        enabled: Schema.boolean().default(true).description('启用抖音解析'),
+        enabled: Schema.boolean().default(true).description('启用'),
         api: Schema.object({
-          baseUrl: Schema.string().default('https://api.douyin.wtf').description('Douyin_TikTok_Download_API 地址'),
-          fallbackUrls: Schema.array(String).role('table').default([]).description('抖音解析备用 API 地址列表（按顺序回退）'),
-        }).description('抖音 API 设置'),
-        maxImages: Schema.number().default(9).min(1).max(20).description('图文最多保留图片数量'),
-        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（仅抖音，支持 platform:guildId）'),
-      }).description('抖音解析设置'),
+          baseUrl: Schema.string().default('https://api.douyin.wtf').description('主 API 地址'),
+          fallbackUrls: Schema.array(String).role('table').default([]).description('备用 API 列表'),
+        }).description('API'),
+        maxImages: Schema.number().default(9).min(1).max(20).description('图文最大图片数'),
+        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析群黑名单'),
+      }).description('抖音'),
+    }),
+  }).description('平台：抖音'),
+
+  // ── 平台：小红书 ──────────────────────────────────────
+  Schema.object({
+    platforms: Schema.object({
       xiaohongshu: Schema.object({
-        enabled: Schema.boolean().default(true).description('启用小红书解析'),
-        userAgent: Schema.string().default(DEFAULT_USER_AGENT).description('抓取页面使用的 User-Agent'),
-        maxRetries: Schema.number().default(3).min(1).max(6).description('抓取失败重试次数'),
-        maxImages: Schema.number().default(20).min(1).max(40).description('图文最多保留图片数量'),
-        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（仅小红书，支持 platform:guildId）'),
-        useBrowser: Schema.boolean().default(false).description('使用浏览器模式绕过反爬验证（需要 puppeteer 服务）'),
-        browserTimeout: Schema.number().default(30000).min(5000).max(120000).description('浏览器模式超时时间（毫秒）'),
-        cookies: Schema.string().role('textarea').default('').description('小红书登录 cookie（每行一个，格式：a1=xxx 或 web_session=xxx）'),
-      }).description('小红书解析设置'),
+        enabled: Schema.boolean().default(true).description('启用'),
+        userAgent: Schema.string().default(DEFAULT_USER_AGENT).description('User-Agent'),
+        maxRetries: Schema.number().default(3).min(1).max(6).description('重试次数'),
+        maxImages: Schema.number().default(20).min(1).max(40).description('图文最大图片数'),
+        useBrowser: Schema.boolean().default(false).description('浏览器模式（需 puppeteer）'),
+        browserTimeout: Schema.number().default(30000).min(5000).max(120000).description('浏览器超时（ms）'),
+        cookies: Schema.string().role('textarea').default('').description('登录 Cookie'),
+        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析群黑名单'),
+      }).description('小红书'),
+    }),
+  }).description('平台：小红书'),
+
+  // ── 平台：Bilibili ────────────────────────────────────
+  Schema.object({
+    platforms: Schema.object({
       bilibili: Schema.object({
-        enabled: Schema.boolean().default(true).description('启用 Bilibili 解析'),
-        fetchVideo: Schema.boolean().default(true).description('尝试获取视频直链'),
+        enabled: Schema.boolean().default(true).description('启用'),
+        fetchVideo: Schema.boolean().default(true).description('获取视频直链'),
         videoQuality: Schema.union([
           Schema.const(480).description('480P'),
-          Schema.const(720).description('720P（推荐）'),
+          Schema.const(720).description('720P'),
         ]).default(720).description('视频画质'),
-        maxDescLength: Schema.number().default(100).min(20).max(500).description('视频简介最大字符数'),
-        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（仅 Bilibili，支持 platform:guildId）'),
-      }).description('Bilibili 解析设置'),
-      twitter: Schema.object({
-        enabled: Schema.boolean().default(false).description('启用 Twitter/X 解析（FxTwitter/Grok）'),
-        maxImages: Schema.number().default(9).min(1).max(20).description('图片推文最多保留图片数量'),
-        grok: Schema.object({
-          enabled: Schema.boolean().default(false).description('启用 Grok 作为 Twitter/X 文本与图片解析来源'),
-          model: Schema.dynamic('model').default('grok-4.1-fast').description('Grok 模型（使用 ChatLuna 模型下拉）'),
-          timeoutMs: Schema.number().default(35_000).min(3_000).max(180_000).description('Grok 请求超时（毫秒）'),
-        }).description('Twitter/X Grok 设置'),
-        routing: Schema.object({
-          textProviderOrder: Schema.string().default('fxtwitter,grok').description('文本解析优先级（逗号分隔：fxtwitter,grok）'),
-          imageProviderOrder: Schema.string().default('fxtwitter,grok').description('图片解析优先级（逗号分隔：fxtwitter,grok）'),
-          videoProviderOrder: Schema.string().default('fxtwitter,grok').description('视频解析优先级（逗号分隔：fxtwitter,grok）'),
-          translationProviderOrder: Schema.string().default('grok').description('翻译优先级（当前仅支持：grok）'),
-        }).description('Twitter/X 路由优先级设置'),
-        translation: Schema.object({
-          enabled: Schema.boolean().default(false).description('启用 Twitter/X 正文翻译'),
-          targetLanguage: Schema.string().default('zh-CN').description('翻译目标语言（如 zh-CN）'),
-          maxChars: Schema.number().default(1200).min(80).max(10_000).description('翻译前截断最大字符数'),
-          showOriginal: Schema.boolean().default(true).description('发送时保留原文（关闭后仅展示译文）'),
-        }).description('Twitter/X 翻译设置'),
-        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析 guild 黑名单（仅 Twitter/X，支持 platform:guildId）'),
-      }).description('Twitter/X 解析设置'),
+        maxDescLength: Schema.number().default(100).min(20).max(500).description('简介最大长度'),
+        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析群黑名单'),
+      }).description('Bilibili'),
     }),
-  }).description('平台设置'),
+  }).description('平台：Bilibili'),
+
+  // ── 平台：Twitter/X ──────────────────────────────────
+  Schema.object({
+    platforms: Schema.object({
+      twitter: Schema.object({
+        enabled: Schema.boolean().default(false).description('启用'),
+        maxImages: Schema.number().default(9).min(1).max(20).description('最大图片数'),
+        grok: Schema.object({
+          enabled: Schema.boolean().default(false).description('启用 Grok 解析'),
+          model: Schema.dynamic('model').default('grok-4.1-fast').description('模型'),
+          timeoutMs: Schema.number().default(35_000).min(3_000).max(180_000).description('超时（ms）'),
+        }).description('Grok'),
+        routing: Schema.object({
+          textProviderOrder: Schema.string().default('fxtwitter,grok').description('文本优先级'),
+          imageProviderOrder: Schema.string().default('fxtwitter,grok').description('图片优先级'),
+          videoProviderOrder: Schema.string().default('fxtwitter,grok').description('视频优先级'),
+          translationProviderOrder: Schema.string().default('grok').description('翻译优先级'),
+        }).description('路由'),
+        translation: Schema.object({
+          enabled: Schema.boolean().default(false).description('启用翻译'),
+          targetLanguage: Schema.string().default('zh-CN').description('目标语言'),
+          maxChars: Schema.number().default(1200).min(80).max(10_000).description('截断上限'),
+          showOriginal: Schema.boolean().default(true).description('保留原文'),
+        }).description('翻译'),
+        autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析群黑名单'),
+      }).description('Twitter/X'),
+    }),
+  }).description('平台：Twitter/X'),
+
+  // ── 自动解析 ──────────────────────────────────────────
   Schema.object({
     autoParse: Schema.object({
-      enabled: Schema.boolean().default(true).description('启用自动解析中间件'),
-      onlyGroup: Schema.boolean().default(true).description('仅在群聊触发自动解析'),
+      enabled: Schema.boolean().default(true).description('启用'),
+      onlyGroup: Schema.boolean().default(true).description('仅群聊触发'),
       blacklist: Schema.object({
-        guilds: Schema.array(String).role('table').default([]).hidden().description('兼容旧配置：自动解析全局 guild 黑名单（建议改用各平台 autoParseBlockedGuilds）'),
-        users: Schema.array(String).role('table').default([]).description('自动解析 user 黑名单（支持 platform:userId）'),
-      }).description('自动解析黑名单'),
-      maxUrlsPerMessage: Schema.number().default(3).min(1).max(10).description('单条消息最多解析链接数量'),
-    }).description('自动解析设置'),
-    forward: Schema.object({
-      enabled: Schema.boolean().default(true).description('图片内容优先使用合并转发（OneBot）'),
-      nickname: Schema.string().default('内容解析').description('合并转发显示昵称'),
-      includeMusic: Schema.boolean().default(true).description('抖音图文转发时附带背景音乐'),
-      autoMergeForward: Schema.boolean().default(true).description('长文本/多图自动合并转发，减少刷屏'),
-      longTextThreshold: Schema.number().default(260).min(80).max(2_000).description('触发自动合并转发的文本长度阈值'),
-      imageMergeThreshold: Schema.number().default(2).min(1).max(20).description('触发自动合并转发的图片数量阈值'),
-      maxForwardImages: Schema.number().default(4).min(1).max(10).description('合并转发中最多图片数量（超出部分用普通消息发送，避免 OneBot 超时）'),
-      textChunkSize: Schema.number().default(280).min(80).max(1_000).description('合并转发模式下文本分片长度'),
-      maxForwardNodes: Schema.number().default(25).min(5).max(80).description('单次合并转发最多节点数'),
-    }).description('转发消息设置'),
-    tool: Schema.object({
-      enabled: Schema.boolean().default(true).description('注册 ChatLuna 工具'),
-      name: Schema.string().default('read_social_media').description('工具名称'),
-      description: Schema.string()
-        .default('读取抖音/小红书/B站/Twitter(X) 链接并返回结构化内容。')
-        .description('工具描述'),
-    }).description('ChatLuna 工具设置'),
-  }).description('自动解析与转发设置'),
+        guilds: Schema.array(String).role('table').default([]).hidden().description('旧版全局群黑名单（兼容）'),
+        users: Schema.array(String).role('table').default([]).description('用户黑名单'),
+      }).description('黑名单'),
+      maxUrlsPerMessage: Schema.number().default(3).min(1).max(10).description('单条消息最大解析数'),
+    }),
+  }).description('自动解析'),
+
+  // ── 合并转发 ──────────────────────────────────────────
   Schema.object({
-    debug: Schema.boolean().default(false).description('输出调试日志'),
-  }).description('调试设置'),
+    forward: Schema.object({
+      enabled: Schema.boolean().default(true).description('启用（OneBot 合并转发）'),
+      nickname: Schema.string().default('内容解析').description('转发昵称'),
+      includeMusic: Schema.boolean().default(true).description('抖音附带背景音乐'),
+      autoMergeForward: Schema.boolean().default(true).description('长文/多图自动合并'),
+      longTextThreshold: Schema.number().default(260).min(80).max(2_000).description('触发合并的文本长度'),
+      imageMergeThreshold: Schema.number().default(2).min(1).max(20).description('触发合并的图片数'),
+      maxForwardImages: Schema.number().default(4).min(1).max(10).description('合并转发最大图片数'),
+      textChunkSize: Schema.number().default(280).min(80).max(1_000).description('文本分片长度'),
+      maxForwardNodes: Schema.number().default(25).min(5).max(80).description('最大转发节点数'),
+    }),
+  }).description('合并转发'),
+
+  // ── ChatLuna 工具 ─────────────────────────────────────
+  Schema.object({
+    tool: Schema.object({
+      enabled: Schema.boolean().default(true).description('注册工具'),
+      name: Schema.string().default('read_social_media').description('工具名称'),
+      description: Schema.string().default('读取抖音/小红书/B站/Twitter(X) 链接并返回结构化内容。').description('工具描述'),
+    }),
+  }).description('ChatLuna 工具'),
 ])
 
 export interface MigrationResult {
