@@ -27,34 +27,28 @@ function isSocialMediaParserPluginName(name: string | undefined): boolean {
 
 const NAV_GROUPS: NavGroup[] = [
   {
-    title: '基础',
+    title: '通用',
     sections: [
-      { key: 'network-media', title: '网络与媒体设置' },
-      { key: 'network', title: '网络设置' },
-      { key: 'media', title: '媒体与发送设置' },
+      { key: 'common', title: '通用' },
+      { key: 'network', title: '网络' },
+      { key: 'media', title: '媒体' },
     ],
   },
   {
     title: '平台',
     sections: [
-      { key: 'platforms', title: '平台设置' },
-      { key: 'douyin', title: '抖音解析设置' },
-      { key: 'xhs', title: '小红书解析设置' },
-      { key: 'bili', title: 'Bilibili 解析设置' },
-      { key: 'twitter', title: 'Twitter/X 解析设置' },
-      { key: 'twitter-grok', title: 'Twitter/X Grok 设置' },
-      { key: 'twitter-routing', title: 'Twitter/X 路由优先级设置' },
-      { key: 'twitter-translation', title: 'Twitter/X 翻译设置' },
+      { key: 'douyin', title: '抖音' },
+      { key: 'xhs', title: '小红书' },
+      { key: 'bili', title: 'Bilibili' },
+      { key: 'twitter', title: 'Twitter/X' },
     ],
   },
   {
-    title: '自动、转发与工具',
+    title: '功能',
     sections: [
-      { key: 'auto-forward', title: '自动解析与转发设置' },
-      { key: 'auto-parse', title: '自动解析设置' },
-      { key: 'forward', title: '转发消息设置' },
-      { key: 'tool', title: 'ChatLuna 工具设置' },
-      { key: 'debug', title: '调试设置' },
+      { key: 'auto-parse', title: '自动解析' },
+      { key: 'forward', title: '合并转发' },
+      { key: 'tool', title: 'ChatLuna 工具' },
     ],
   },
 ]
@@ -62,22 +56,16 @@ const NAV_GROUPS: NavGroup[] = [
 const NAV_SECTIONS: NavSection[] = NAV_GROUPS.flatMap((group) => group.sections)
 
 const SECTION_TITLE_ALIASES: Record<string, string[]> = {
-  'network-media': ['网络与媒体设置'],
-  network: ['网络设置'],
-  media: ['媒体与发送设置'],
-  platforms: ['平台设置', '平台解析设置'],
-  douyin: ['抖音解析设置'],
-  xhs: ['小红书解析设置'],
-  bili: ['Bilibili 解析设置', '哔哩哔哩'],
-  twitter: ['Twitter/X 解析设置', 'Twitter'],
-  'twitter-grok': ['Twitter/X Grok 设置', 'Grok 设置'],
-  'twitter-routing': ['Twitter/X 路由优先级设置', '路由优先级设置'],
-  'twitter-translation': ['Twitter/X 翻译设置', '翻译设置'],
-  'auto-forward': ['自动解析与转发设置'],
-  forward: ['转发消息设置'],
-  'auto-parse': ['自动解析设置'],
-  tool: ['ChatLuna 工具设置', '工具设置'],
-  debug: ['调试设置'],
+  common: ['通用'],
+  network: ['网络'],
+  media: ['媒体'],
+  douyin: ['抖音'],
+  xhs: ['小红书'],
+  bili: ['Bilibili', '哔哩哔哩'],
+  twitter: ['Twitter/X', 'Twitter'],
+  'auto-parse': ['自动解析'],
+  forward: ['合并转发'],
+  tool: ['ChatLuna 工具', '工具设置'],
 }
 
 const STYLE_ID = 'social-media-parser-nav-style'

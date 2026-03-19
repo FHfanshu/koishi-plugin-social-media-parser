@@ -337,30 +337,33 @@ export function migrateConfig(rawConfig: unknown): MigrationResult {
       : { videoCache: {} },
     autoParse: isRecord(source.autoParse)
       ? {
+          enabled: true,
           ...source.autoParse,
           blacklist: isRecord(source.autoParse.blacklist) ? { ...source.autoParse.blacklist } : {},
         }
-      : { blacklist: {} },
-    tool: isRecord(source.tool) ? { ...source.tool } : {},
+      : { enabled: true, blacklist: {} },
+    tool: isRecord(source.tool) ? { enabled: true, ...source.tool } : { enabled: true },
     platforms: isRecord(source.platforms)
       ? {
           ...source.platforms,
           douyin: isRecord(source.platforms.douyin)
             ? {
+                enabled: true,
                 ...source.platforms.douyin,
                 api: isRecord(source.platforms.douyin.api) ? { ...source.platforms.douyin.api } : {},
               }
-            : { api: {} },
-          xiaohongshu: isRecord(source.platforms.xiaohongshu) ? { ...source.platforms.xiaohongshu } : {},
-          bilibili: isRecord(source.platforms.bilibili) ? { ...source.platforms.bilibili } : {},
+            : { enabled: true, api: {} },
+          xiaohongshu: isRecord(source.platforms.xiaohongshu) ? { enabled: true, ...source.platforms.xiaohongshu } : { enabled: true },
+          bilibili: isRecord(source.platforms.bilibili) ? { enabled: true, ...source.platforms.bilibili } : { enabled: true },
           twitter: isRecord(source.platforms.twitter)
             ? {
+                enabled: false,
                 ...source.platforms.twitter,
                 grok: isRecord(source.platforms.twitter.grok) ? { ...source.platforms.twitter.grok } : {},
                 routing: isRecord(source.platforms.twitter.routing) ? { ...source.platforms.twitter.routing } : {},
                 translation: isRecord(source.platforms.twitter.translation) ? { ...source.platforms.twitter.translation } : {},
               }
-            : { grok: {}, routing: {}, translation: {} },
+            : { enabled: false, grok: {}, routing: {}, translation: {} },
         }
       : {
           douyin: { api: {} },
