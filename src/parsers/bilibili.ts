@@ -232,6 +232,7 @@ export async function parseBilibili(
     title: detail.title,
     author: detail.owner || undefined,
     content: buildContent(detail, config.platforms.bilibili.maxDescLength),
+    descriptionFull: compactDescription(detail.description) || undefined,
     images: detail.cover ? [detail.cover] : [],
     videos: videoUrls,
     audios: audioUrls,
@@ -706,12 +707,14 @@ async function fetchBilibiliComments(
   const seen = new Set<string>()
 
   const addComment = (user: string, content: string, likes: number, isPinned: boolean) => {
-    const key = `${user}:${content}`
-    if (seen.has(key) || !content) return
+    const normalizedUser = user.trim() || '匿名用户'
+    // 压缩评论中的换行与多余空白，避免空评论和换行差异导致的重复
+    const compact = content.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim()
+    if (!compact) return
+    const key = `${normalizedUser}:${compact}`
+    if (seen.has(key)) return
     seen.add(key)
-    // 压缩评论中的换行
-    const compact = content.replace(/[\r\n]+/g, ' ').trim()
-    comments.push({ user, content: truncate(compact, 120), likes, isPinned })
+    comments.push({ user: normalizedUser, content: truncate(compact, 120), likes, isPinned })
   }
 
   // Fetch pinned comment (置顶评论)
@@ -731,7 +734,12 @@ async function fetchBilibiliComments(
       }
     }
   } catch (err) {
-    logger.debug(`bilibili pinned comment fetch failed: ${(err as Error)?.message}`)
+    const message = `bilibili pinned comment fetch failed: ${(err as Error)?.message}`
+    if (config.debug) {
+      logger.info(message)
+    } else {
+      logger.debug(message)
+    }
   }
 
   // Fetch hot comments (热评)
@@ -750,7 +758,12 @@ async function fetchBilibiliComments(
       }
     }
   } catch (err) {
-    logger.debug(`bilibili hot comments fetch failed: ${(err as Error)?.message}`)
+    const message = `bilibili hot comments fetch failed: ${(err as Error)?.message}`
+    if (config.debug) {
+      logger.info(message)
+    } else {
+      logger.debug(message)
+    }
   }
 
   return comments
@@ -770,7 +783,12 @@ async function fetchBilibiliTags(
     const payload = await requestJson(ctx, endpoint, config.network.timeoutMs, logger)
 
     if (toNumber(payload?.code) !== 0 || !Array.isArray(payload?.data)) {
-      logger.debug(`bilibili tags api: code=${payload?.code}`)
+      const message = `bilibili tags api: code=${payload?.code}`
+      if (config.debug) {
+        logger.info(message)
+      } else {
+        logger.debug(message)
+      }
       return []
     }
 
@@ -779,7 +797,12 @@ async function fetchBilibiliTags(
       .filter((name: string) => name.length > 0)
       .slice(0, maxCount)
   } catch (err) {
-    logger.debug(`bilibili tags fetch failed: ${(err as Error)?.message}`)
+    const message = `bilibili tags fetch failed: ${(err as Error)?.message}`
+    if (config.debug) {
+      logger.info(message)
+    } else {
+      logger.debug(message)
+    }
     return []
   }
 }
@@ -892,13 +915,7 @@ function buildContent(detail: BilibiliVideoDetail, maxDescLength: number): strin
     lines.push(`分P: 第 ${detail.page} P`)
   }
 
-  // 压缩简介中的换行为空格分隔，保持单行整洁
-  const compactDesc = detail.description
-    .replace(/\r\n?/g, '\n')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join(' | ')
+  const compactDesc = compactDescription(detail.description)
 
   const description = truncate(compactDesc, maxDescLength)
   if (description) {
@@ -906,6 +923,15 @@ function buildContent(detail: BilibiliVideoDetail, maxDescLength: number): strin
   }
 
   return lines.join('\n')
+}
+
+function compactDescription(input: string): string {
+  return `${input || ''}`
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(' | ')
 }
 
 function truncate(input: string, maxLength: number): string {

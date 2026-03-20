@@ -50,7 +50,8 @@ export async function sendParsedContent(
   const isOneBot = session.platform === 'onebot'
   const sourceUrl = simplifyDisplayUrl(parsed.resolvedUrl || parsed.originalUrl)
   const platformName = getPlatformName(parsed.platform)
-  const intro = buildIntroText(platformName, parsed, sourceUrl, config)
+  const introBlocks = buildIntroBlocks(platformName, parsed, sourceUrl, config)
+  const intro = introBlocks.join('\n\n')
   const imageUrls = resolveImageUrlsForSend(parsed, config)
 
   const shouldAutoForward =
@@ -82,14 +83,14 @@ export async function sendParsedContent(
     const shouldForwardVideo = isOneBot && config.forward.enabled
 
     if (shouldForwardVideo) {
-      const forwardResult = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
+      const forwardResult = await sendForwardContentOrPlain(ctx, session, introBlocks, imageSegments, config, logger)
       if (forwardResult !== 'full') {
         await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
       } else {
         await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
       }
     } else {
-      await sendIntroPlain(session, intro)
+      await sendIntroBlocksPlain(session, introBlocks)
       await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
     }
 
@@ -157,7 +158,7 @@ export async function sendParsedContent(
     const shouldForwardImages = isOneBot && config.forward.enabled
 
     if (shouldForwardImages) {
-      const forwardMode = await sendForwardContentOrPlain(ctx, session, intro, imageSegments, config, logger)
+      const forwardMode = await sendForwardContentOrPlain(ctx, session, introBlocks, imageSegments, config, logger)
       // Only send music, remaining images are truncated to avoid timeout
       if (forwardMode !== 'full') {
         await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
@@ -167,7 +168,7 @@ export async function sendParsedContent(
       return
     }
 
-    await sendIntroPlain(session, intro)
+    await sendIntroBlocksPlain(session, introBlocks)
     await sendMediaPlain(ctx, session, imageSegments, parsed.musicUrl, config, logger)
     return
   }
@@ -179,7 +180,7 @@ export async function sendParsedContent(
     && (intro.length >= config.forward.longTextThreshold || shouldForwardByMediaCount)
 
   if (shouldForwardTextOnly) {
-    const nodes = createForwardTextNodes(intro, session, config)
+    const nodes = createForwardTextNodesFromBlocks(introBlocks, session, config)
     const forwarded = await sendForwardNodes(ctx, session, nodes, config, logger)
     if (forwarded) {
       await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
@@ -187,7 +188,7 @@ export async function sendParsedContent(
     }
   }
 
-  await sendIntroPlain(session, intro)
+  await sendIntroBlocksPlain(session, introBlocks)
   await sendMediaPlain(ctx, session, [], parsed.musicUrl, config, logger)
 }
 
@@ -1047,29 +1048,29 @@ function normalizeOneBotImageFile(attrs: Record<string, unknown>): string {
 async function sendImagesPlain(
   ctx: Context,
   session: Session,
-  intro: string,
+  introBlocks: string[],
   imageSegments: any[],
   musicUrl: string | undefined,
   config: Config,
   logger: Logger
 ): Promise<void> {
-  await sendIntroPlain(session, intro)
+  await sendIntroBlocksPlain(session, introBlocks)
   await sendMediaPlain(ctx, session, imageSegments, musicUrl, config, logger)
 }
 
 async function sendForwardIntroOrPlain(
   ctx: Context,
   session: Session,
-  intro: string,
+  introBlocks: string[],
   config: Config,
   logger: Logger
 ): Promise<void> {
-  const nodes = createForwardTextNodes(intro, session, config)
+  const nodes = createForwardTextNodesFromBlocks(introBlocks, session, config)
   if (nodes.length && await sendForwardNodes(ctx, session, nodes, config, logger)) {
     return
   }
 
-  await sendIntroPlain(session, intro)
+  await sendIntroBlocksPlain(session, introBlocks)
 }
 
 type ForwardContentMode = 'full' | 'text-only' | 'none'
@@ -1077,12 +1078,12 @@ type ForwardContentMode = 'full' | 'text-only' | 'none'
 async function sendForwardContentOrPlain(
   ctx: Context,
   session: Session,
-  intro: string,
+  introBlocks: string[],
   imageSegments: any[],
   config: Config,
   logger: Logger
 ): Promise<ForwardContentMode> {
-  const contentNodes = createForwardContentNodes(intro, imageSegments, session, config)
+  const contentNodes = createForwardContentNodes(introBlocks, imageSegments, session, config)
 
   if (contentNodes.length && await sendForwardNodes(ctx, session, contentNodes, config, logger)) {
     return 'full'
@@ -1090,7 +1091,7 @@ async function sendForwardContentOrPlain(
 
   // OneBot can fail on image nodes in merged forward. Fallback to text-only forward first.
   if (imageSegments.length) {
-    const textNodes = createForwardTextNodes(intro, session, config)
+    const textNodes = createForwardTextNodesFromBlocks(introBlocks, session, config)
     if (textNodes.length && await sendForwardNodes(ctx, session, textNodes, config, logger)) {
       if (config.debug) {
         logger.info('forward fallback: text-only merged forward succeeded, images will be sent as plain messages')
@@ -1099,16 +1100,17 @@ async function sendForwardContentOrPlain(
     }
   }
 
-  await sendIntroPlain(session, intro)
+  await sendIntroBlocksPlain(session, introBlocks)
   return 'none'
 }
 
-async function sendIntroPlain(session: Session, intro: string): Promise<void> {
-  if (!intro.trim()) {
-    return
+async function sendIntroBlocksPlain(session: Session, introBlocks: string[]): Promise<void> {
+  for (const intro of introBlocks) {
+    if (!intro.trim()) {
+      continue
+    }
+    await session.send(h.text(intro))
   }
-
-  await session.send(h.text(intro))
 }
 
 async function sendMediaPlain(
@@ -1199,10 +1201,7 @@ function isHttpMediaUrl(input: string): boolean {
   return input.startsWith('http://') || input.startsWith('https://')
 }
 
-function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: string, config: Config): string {
-  const originalText = parsed.content?.trim() ? truncateText(parsed.content.trim(), 350) : ''
-  const translatedText = parsed.translatedContent?.trim() ? truncateText(parsed.translatedContent.trim(), 350) : ''
-
+function buildIntroBlocks(platformName: string, parsed: ParsedContent, sourceUrl: string, config: Config): string[] {
   // 作者信息：B站显示UP主，小红书显示作者
   const authorLabel = getAuthorLabel(parsed.platform)
   const authorText = parsed.author ? `${authorLabel}：${parsed.author}` : ''
@@ -1222,6 +1221,29 @@ function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: 
     commentsText = commentLines.join('\n')
   }
 
+  if (parsed.platform === 'bilibili') {
+    const contentLines = `${parsed.content || ''}`
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+    const baseLines = contentLines.filter((line) => !/^简介[:：]\s*/.test(line))
+    const summaryBlock = [
+      `【${platformName}解析】${parsed.title || '无标题'}`,
+      authorText,
+      baseLines.join('\n'),
+      tagsText,
+      commentsText,
+      sourceUrl,
+    ].filter(Boolean).join('\n\n')
+
+    const descriptionFull = `${parsed.descriptionFull || ''}`.trim() || extractDescriptionFromContentLines(contentLines)
+    const descriptionBlock = descriptionFull ? `简介：\n${descriptionFull}` : ''
+    return [summaryBlock, descriptionBlock].filter((block) => block.trim().length > 0)
+  }
+
+  const originalText = parsed.content?.trim() ? truncateText(parsed.content.trim(), 350) : ''
+  const translatedText = parsed.translatedContent?.trim() ? truncateText(parsed.translatedContent.trim(), 350) : ''
+
   if (parsed.platform === 'twitter' && translatedText) {
     const textPart = config.platforms.twitter.translation.showOriginal
       ? [
@@ -1230,22 +1252,32 @@ function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: 
         ].filter(Boolean).join('\n\n')
       : `翻译：\n${translatedText}`
 
-    return [
+    return [[
       `【${platformName}解析】${parsed.title || '无标题'}`,
       authorText,
       textPart,
       sourceUrl,
-    ].filter(Boolean).join('\n\n')
+    ].filter(Boolean).join('\n\n')]
   }
 
-  return [
+  return [[
     `【${platformName}解析】${parsed.title || '无标题'}`,
     authorText,
     originalText,
     tagsText,
     commentsText,
     sourceUrl,
-  ].filter(Boolean).join('\n\n')
+  ].filter(Boolean).join('\n\n')]
+}
+
+function extractDescriptionFromContentLines(lines: string[]): string {
+  for (const line of lines) {
+    const match = line.match(/^简介[:：]\s*(.*)$/)
+    if (match && match[1]) {
+      return match[1].trim()
+    }
+  }
+  return ''
 }
 
 function getAuthorLabel(platform: ParsedContent['platform']): string {
@@ -1332,14 +1364,29 @@ function isXiaohongshuCdnUrl(url: string): boolean {
   }
 }
 
-function createForwardTextNodes(text: string, session: Session, config: Config): any[] {
-  const chunks = splitTextChunks(text, config.forward.textChunkSize)
-  const limited = chunks.slice(0, Math.max(1, config.forward.maxForwardNodes))
-  return limited.map((chunk) => h('message', { nickname: config.forward.nickname, userId: session.selfId }, chunk))
+function createForwardTextNodesFromBlocks(textBlocks: string[], session: Session, config: Config): any[] {
+  const chunks: string[] = []
+  const maxNodes = Math.max(1, config.forward.maxForwardNodes)
+
+  for (const block of textBlocks) {
+    if (!block || !block.trim()) {
+      continue
+    }
+
+    const parts = splitTextChunks(block, config.forward.textChunkSize)
+    for (const part of parts) {
+      chunks.push(part)
+      if (chunks.length >= maxNodes) {
+        return chunks.map((chunk) => h('message', { nickname: config.forward.nickname, userId: session.selfId }, chunk))
+      }
+    }
+  }
+
+  return chunks.map((chunk) => h('message', { nickname: config.forward.nickname, userId: session.selfId }, chunk))
 }
 
-function createForwardContentNodes(text: string, imageSegments: any[], session: Session, config: Config): any[] {
-  const nodes = createForwardTextNodes(text, session, config)
+function createForwardContentNodes(textBlocks: string[], imageSegments: any[], session: Session, config: Config): any[] {
+  const nodes = createForwardTextNodesFromBlocks(textBlocks, session, config)
   const remaining = Math.max(0, config.forward.maxForwardNodes - nodes.length)
   if (!remaining || !imageSegments.length) {
     return nodes

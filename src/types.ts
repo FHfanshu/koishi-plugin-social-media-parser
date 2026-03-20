@@ -29,6 +29,7 @@ export interface ParsedContent {
   translationProvider?: TwitterProvider
   videoDurationSec?: number
   musicUrl?: string
+  descriptionFull?: string
   tags?: string[]
   comments?: CommentItem[]
   originalUrl: string
