@@ -11,8 +11,16 @@ type ChatlunaLike = {
     registerTool?: (
       name: string,
       options: {
+        description?: string
         selector(): boolean
         createTool(): unknown
+        meta?: {
+          source?: 'core' | 'extension' | 'mcp' | 'action' | string
+          group?: string
+          tags?: string[]
+          isMcp?: boolean
+          serverName?: string
+        }
       },
     ) => (() => void) | undefined
   }
@@ -103,6 +111,12 @@ export function registerSocialMediaTool(ctx: Context, config: Config): void {
   ctx.effect(() => {
     logger.info(`[tool] register ${toolName}`)
     const dispose = chatluna.platform?.registerTool?.(toolName, {
+      description: toolDescription,
+      meta: {
+        source: 'extension',
+        group: 'social-media',
+        tags: ['social-media', 'parser'],
+      },
       selector() {
         return true
       },
