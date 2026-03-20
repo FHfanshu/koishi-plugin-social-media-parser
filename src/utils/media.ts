@@ -24,6 +24,8 @@ type VideoBuildResult =
   | { success: true; element: any }
   | { success: false; reason: VideoSkipReason }
 
+type VideoSendResult = 'sent' | 'timeout' | 'failed'
+
 // Module-level video cache manager (set by the plugin)
 let videoCacheManager: VideoCacheManager | null = null
 const RECENT_VIDEO_SEND_TTL_MS = 90_000
@@ -109,7 +111,23 @@ export async function sendParsedContent(
           return
         }
         rememberRecentVideoSend(session, parsed)
-        await session.send(result.element)
+        const sendResult = await sendVideoElementSafely(session, result.element, logger)
+        if (sendResult === 'sent' || sendResult === 'timeout') {
+          return
+        }
+
+        const sendFailedMessage = buildVideoSkipMessage(
+          { type: 'download_failed', error: 'send_failed' },
+          platformName,
+          sourceUrl
+        )
+        if (sendFailedMessage) {
+          try {
+            await session.send(sendFailedMessage)
+          } catch (fallbackError) {
+            logger.warn(`video send fallback message failed: ${String((fallbackError as Error)?.message || fallbackError)}`)
+          }
+        }
         return
       }
 
@@ -183,6 +201,28 @@ function getPlatformName(platform: ParsedContent['platform']): string {
       return 'Twitter/X'
     default:
       return '小红书'
+  }
+}
+
+async function sendVideoElementSafely(
+  session: Session,
+  element: any,
+  logger: Logger
+): Promise<VideoSendResult> {
+  try {
+    await session.send(element)
+    return 'sent'
+  } catch (error) {
+    const errorMsg = String((error as Error)?.message || error)
+    if (isTimeoutError(errorMsg)) {
+      // Timeout on media send can be "uncertain sent" (adapter timeout after upstream accepted upload).
+      // Skip immediate retry/fallback to avoid duplicate video messages.
+      logger.warn(`video send timeout, treat as uncertain sent and skip fallback: ${errorMsg}`)
+      return 'timeout'
+    }
+
+    logger.warn(`video send failed: ${errorMsg}`)
+    return 'failed'
   }
 }
 
