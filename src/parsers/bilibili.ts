@@ -929,9 +929,10 @@ function compactDescription(input: string): string {
   return `${input || ''}`
     .replace(/\r\n?/g, '\n')
     .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join(' | ')
+    .map((line) => line.trimEnd())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 function truncate(input: string, maxLength: number): string {
