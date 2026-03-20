@@ -3,7 +3,7 @@ import crypto from 'node:crypto'
 import type { Context, Logger } from 'koishi'
 
 import type { Config } from '../config'
-import type { ParsedContent } from '../types'
+import type { CommentItem, ParsedContent } from '../types'
 import { NetworkError, NotFoundError, ParseError, RateLimitError } from '../utils/errors'
 import { requestText, resolveRedirect } from '../utils/http'
 import { withRetry } from '../utils/retry'
@@ -100,6 +100,13 @@ interface BilibiliPlayInfo {
   audioUrls: string[]
   videoCodecid: number
   videoQuality: number
+}
+
+interface BilibiliComment {
+  user: string
+  content: string
+  likes: number
+  isPinned: boolean
 }
 
 interface WbiMixinCache {
@@ -200,6 +207,26 @@ export async function parseBilibili(
     }
   }
 
+  // Fetch comments and tags in parallel (non-blocking, best-effort)
+  const [comments, tags] = await Promise.all([
+    config.platforms.bilibili.fetchComments
+      ? fetchBilibiliComments(ctx, detail.aid, config.platforms.bilibili.commentCount, config, logger)
+      : Promise.resolve([]),
+    config.platforms.bilibili.fetchTags
+      ? fetchBilibiliTags(ctx, detail.bvid, config.platforms.bilibili.maxTagCount, config, logger)
+      : Promise.resolve([]),
+  ])
+
+  const extra: Record<string, unknown> = {
+    bvid: detail.bvid,
+    aid: detail.aid,
+    cid: detail.cid,
+    page,
+    engagement: detail.stats,
+    videoQuality: playInfo?.videoQuality,
+    videoCodecid: playInfo?.videoCodecid,
+  }
+
   return {
     platform: 'bilibili',
     title: detail.title,
@@ -209,17 +236,11 @@ export async function parseBilibili(
     videos: videoUrls,
     audios: audioUrls,
     videoDurationSec: detail.durationSec > 0 ? detail.durationSec : undefined,
+    tags: tags.length > 0 ? tags : undefined,
+    comments: comments.length > 0 ? comments : undefined,
     originalUrl: inputUrl,
     resolvedUrl: canonicalUrl,
-    extra: {
-      bvid: detail.bvid,
-      aid: detail.aid,
-      cid: detail.cid,
-      page,
-      engagement: detail.stats,
-      videoQuality: playInfo?.videoQuality,
-      videoCodecid: playInfo?.videoCodecid,
-    },
+    extra,
   }
 }
 
@@ -672,6 +693,97 @@ async function fetchVideoViaIi1Fun(
   }
 }
 
+async function fetchBilibiliComments(
+  ctx: Context,
+  aid: string,
+  maxCount: number,
+  config: Config,
+  logger: Logger
+): Promise<BilibiliComment[]> {
+  if (!aid || maxCount <= 0) return []
+
+  const comments: BilibiliComment[] = []
+  const seen = new Set<string>()
+
+  const addComment = (user: string, content: string, likes: number, isPinned: boolean) => {
+    const key = `${user}:${content}`
+    if (seen.has(key) || !content) return
+    seen.add(key)
+    // 压缩评论中的换行
+    const compact = content.replace(/[\r\n]+/g, ' ').trim()
+    comments.push({ user, content: truncate(compact, 120), likes, isPinned })
+  }
+
+  // Fetch pinned comment (置顶评论)
+  try {
+    const pinnedEndpoint = `https://api.bilibili.com/x/v2/reply/main?type=1&oid=${encodeURIComponent(aid)}&mode=2&ps=1`
+    const pinnedPayload = await requestJson(ctx, pinnedEndpoint, config.network.timeoutMs, logger)
+    if (toNumber(pinnedPayload?.code) === 0 && pinnedPayload?.data?.upper) {
+      const upper = pinnedPayload.data.upper
+      const topReply = upper.top_reply
+      if (topReply) {
+        addComment(
+          asString(topReply.member?.uname),
+          asString(topReply.content?.message),
+          toNumber(topReply.like),
+          true
+        )
+      }
+    }
+  } catch (err) {
+    logger.debug(`bilibili pinned comment fetch failed: ${(err as Error)?.message}`)
+  }
+
+  // Fetch hot comments (热评)
+  try {
+    const hotEndpoint = `https://api.bilibili.com/x/v2/reply/main?type=1&oid=${encodeURIComponent(aid)}&mode=3&ps=${Math.min(maxCount, 10)}`
+    const hotPayload = await requestJson(ctx, hotEndpoint, config.network.timeoutMs, logger)
+    if (toNumber(hotPayload?.code) === 0 && Array.isArray(hotPayload?.data?.replies)) {
+      for (const reply of hotPayload.data.replies) {
+        if (comments.length >= maxCount) break
+        addComment(
+          asString(reply.member?.uname),
+          asString(reply.content?.message),
+          toNumber(reply.like),
+          false
+        )
+      }
+    }
+  } catch (err) {
+    logger.debug(`bilibili hot comments fetch failed: ${(err as Error)?.message}`)
+  }
+
+  return comments
+}
+
+async function fetchBilibiliTags(
+  ctx: Context,
+  bvid: string,
+  maxCount: number,
+  config: Config,
+  logger: Logger
+): Promise<string[]> {
+  if (!bvid || maxCount <= 0) return []
+
+  try {
+    const endpoint = `https://api.bilibili.com/x/tag/archive/tags?bvid=${encodeURIComponent(bvid)}`
+    const payload = await requestJson(ctx, endpoint, config.network.timeoutMs, logger)
+
+    if (toNumber(payload?.code) !== 0 || !Array.isArray(payload?.data)) {
+      logger.debug(`bilibili tags api: code=${payload?.code}`)
+      return []
+    }
+
+    return payload.data
+      .map((tag: any) => asString(tag?.tag_name).trim())
+      .filter((name: string) => name.length > 0)
+      .slice(0, maxCount)
+  } catch (err) {
+    logger.debug(`bilibili tags fetch failed: ${(err as Error)?.message}`)
+    return []
+  }
+}
+
 function extractVideoId(input: string): BilibiliVideoId | null {
   if (!input) {
     return null
@@ -780,7 +892,15 @@ function buildContent(detail: BilibiliVideoDetail, maxDescLength: number): strin
     lines.push(`分P: 第 ${detail.page} P`)
   }
 
-  const description = truncate(detail.description, maxDescLength)
+  // 压缩简介中的换行为空格分隔，保持单行整洁
+  const compactDesc = detail.description
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(' | ')
+
+  const description = truncate(compactDesc, maxDescLength)
   if (description) {
     lines.push(`简介: ${description}`)
   }

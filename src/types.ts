@@ -6,6 +6,13 @@ export type VideoSendMode = 'storage' | 'base64' | 'url'
 
 export type TwitterProvider = 'fxtwitter' | 'grok'
 
+export interface CommentItem {
+  user: string
+  content: string
+  likes: number
+  isPinned?: boolean
+}
+
 export interface ParsedContent {
   platform: SocialPlatform
   title: string
@@ -22,6 +29,8 @@ export interface ParsedContent {
   translationProvider?: TwitterProvider
   videoDurationSec?: number
   musicUrl?: string
+  tags?: string[]
+  comments?: CommentItem[]
   originalUrl: string
   resolvedUrl?: string
   extra?: Record<string, unknown>

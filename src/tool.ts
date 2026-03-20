@@ -157,6 +157,19 @@ function formatToolOutput(parsed: ParsedContent): Record<string, unknown> {
     output.resources = resources
   }
 
+  if (parsed.tags && parsed.tags.length > 0) {
+    output.tags = parsed.tags
+  }
+
+  if (parsed.comments && parsed.comments.length > 0) {
+    output.comments = parsed.comments.map((c) => ({
+      user: c.user,
+      content: c.content,
+      likes: c.likes,
+      ...(c.isPinned ? { isPinned: true } : {}),
+    }))
+  }
+
   if (parsed.extra && Object.keys(parsed.extra).length > 0) {
     output.extra = parsed.extra
   }

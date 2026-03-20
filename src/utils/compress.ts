@@ -347,8 +347,8 @@ export async function mergeVideoAudioBuffers(
 
     if (durationSec) {
       // Calculate dynamic timeout based on API-provided duration
-      const processingTimeMs = Math.max(30_000, Math.min(300_000, durationSec * 1000 / 3))
-      dynamicTimeoutMs = Math.max(timeoutMs, processingTimeMs)
+      const processingTimeMs = Math.round(Math.max(30_000, Math.min(300_000, durationSec * 1000 / 3)))
+      dynamicTimeoutMs = Math.round(Math.max(timeoutMs, processingTimeMs))
       logger?.warn(`[social-media-parser] mergeVideoAudioBuffers: using timeout ${dynamicTimeoutMs}ms based on API duration ${durationSec}s`)
     } else {
       // Fallback to ffprobe if no API duration provided
@@ -357,8 +357,8 @@ export async function mergeVideoAudioBuffers(
         const probedDuration = await readVideoDuration(ffprobe, videoPath, 10_000)
         if (probedDuration && probedDuration > 0) {
           durationSec = probedDuration
-          const processingTimeMs = Math.max(30_000, Math.min(300_000, probedDuration * 1000 / 3))
-          dynamicTimeoutMs = Math.max(timeoutMs, processingTimeMs)
+          const processingTimeMs = Math.round(Math.max(30_000, Math.min(300_000, probedDuration * 1000 / 3)))
+          dynamicTimeoutMs = Math.round(Math.max(timeoutMs, processingTimeMs))
           logger?.warn(`[social-media-parser] mergeVideoAudioBuffers: video duration ${probedDuration}s (probed), using timeout ${dynamicTimeoutMs}ms`)
         }
       }

@@ -68,6 +68,10 @@ export interface BilibiliConfig {
   fetchVideo: boolean
   videoQuality: 480 | 720
   maxDescLength: number
+  fetchComments: boolean
+  commentCount: number
+  fetchTags: boolean
+  maxTagCount: number
   autoParseBlockedGuilds: string[]
 }
 
@@ -248,6 +252,10 @@ export const Config: Schema<Config> = Schema.intersect([
           Schema.const(720).description('720P'),
         ]).default(720).description('视频画质'),
         maxDescLength: Schema.number().default(100).min(20).max(500).description('简介最大长度'),
+        fetchComments: Schema.boolean().default(false).description('获取热评/置顶评论'),
+        commentCount: Schema.number().default(3).min(1).max(10).description('最大评论数'),
+        fetchTags: Schema.boolean().default(false).description('获取视频标签'),
+        maxTagCount: Schema.number().default(5).min(1).max(15).description('最大标签数'),
         autoParseBlockedGuilds: Schema.array(String).role('table').default([]).description('自动解析群黑名单'),
       }).description('Bilibili'),
     }),

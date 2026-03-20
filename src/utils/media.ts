@@ -1207,6 +1207,21 @@ function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: 
   const authorLabel = getAuthorLabel(parsed.platform)
   const authorText = parsed.author ? `${authorLabel}：${parsed.author}` : ''
 
+  // Tags (Bilibili)
+  const tagsText = parsed.tags && parsed.tags.length > 0
+    ? `标签：${parsed.tags.join('、')}`
+    : ''
+
+  // Comments (Bilibili)
+  let commentsText = ''
+  if (parsed.comments && parsed.comments.length > 0) {
+    const commentLines = parsed.comments.map((c) => {
+      const prefix = c.isPinned ? '【置顶】' : '【热评】'
+      return `${prefix}${c.user}（${formatCount(c.likes)}赞）：${c.content}`
+    })
+    commentsText = commentLines.join('\n')
+  }
+
   if (parsed.platform === 'twitter' && translatedText) {
     const textPart = config.platforms.twitter.translation.showOriginal
       ? [
@@ -1227,6 +1242,8 @@ function buildIntroText(platformName: string, parsed: ParsedContent, sourceUrl: 
     `【${platformName}解析】${parsed.title || '无标题'}`,
     authorText,
     originalText,
+    tagsText,
+    commentsText,
     sourceUrl,
   ].filter(Boolean).join('\n\n')
 }
@@ -1463,6 +1480,13 @@ function findPreferredBreakPoint(text: string, start: number, end: number): numb
 
 function isPreferredBreakChar(char: string): boolean {
   return /\s/.test(char) || /[.,!?;:)\]}]/.test(char)
+}
+
+function formatCount(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0'
+  if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(1).replace(/\.0$/, '')}亿`
+  if (value >= 10_000) return `${(value / 10_000).toFixed(1).replace(/\.0$/, '')}万`
+  return String(Math.floor(value))
 }
 
 function getRecentVideoSendKey(session: Session, parsed: ParsedContent): string {
