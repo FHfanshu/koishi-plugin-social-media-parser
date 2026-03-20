@@ -1226,7 +1226,8 @@ function buildIntroBlocks(platformName: string, parsed: ParsedContent, sourceUrl
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
-    const baseLines = contentLines.filter((line) => !/^简介[:：]\s*/.test(line))
+    const descriptionStart = contentLines.findIndex((line) => /^简介[:：]\s*/.test(line))
+    const baseLines = descriptionStart >= 0 ? contentLines.slice(0, descriptionStart) : contentLines
     const summaryBlock = [
       `【${platformName}解析】${parsed.title || '无标题'}`,
       authorText,
@@ -1271,13 +1272,14 @@ function buildIntroBlocks(platformName: string, parsed: ParsedContent, sourceUrl
 }
 
 function extractDescriptionFromContentLines(lines: string[]): string {
-  for (const line of lines) {
-    const match = line.match(/^简介[:：]\s*(.*)$/)
-    if (match && match[1]) {
-      return match[1].trim()
-    }
+  const start = lines.findIndex((line) => /^简介[:：]\s*/.test(line))
+  if (start < 0) {
+    return ''
   }
-  return ''
+
+  const first = lines[start].replace(/^简介[:：]\s*/, '').trim()
+  const remain = lines.slice(start + 1)
+  return [first, ...remain].filter(Boolean).join('\n').trim()
 }
 
 function getAuthorLabel(platform: ParsedContent['platform']): string {
