@@ -104,8 +104,8 @@ export async function parseXiaohongshu(
     throw new Error('提取小红书初始数据失败')
   }
 
-  const title = String(deepGet(note, ['title']) || '未命名笔记')
-  const content = String(deepGet(note, ['desc']) || '')
+  const content = extractContent(note)
+  const title = extractTitle(note, content)
   const images = extractImages(note, config.platforms.xiaohongshu.maxImages)
   const videos = extractVideos(note)
   const noteId = extractNoteId(canonicalUrl)
@@ -524,35 +524,115 @@ function deepGet(data: unknown, keys: string[]): unknown {
   return value
 }
 
+function extractTitle(note: unknown, content: string): string {
+  const explicitTitle = firstString(
+    deepGet(note, ['title']),
+    deepGet(note, ['displayTitle']),
+    deepGet(note, ['display_title']),
+    deepGet(note, ['noteCard', 'title']),
+    deepGet(note, ['shareInfo', 'title']),
+  )
+  if (explicitTitle) {
+    return trimTitle(explicitTitle)
+  }
+
+  const derived = deriveTitleFromContent(content)
+  return derived || '未命名笔记'
+}
+
+function extractContent(note: unknown): string {
+  return firstString(
+    deepGet(note, ['desc']),
+    deepGet(note, ['description']),
+    deepGet(note, ['content']),
+    deepGet(note, ['noteCard', 'desc']),
+    deepGet(note, ['noteCard', 'displayTitle']),
+    deepGet(note, ['shareInfo', 'desc']),
+  )
+}
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value !== 'string' && typeof value !== 'number') {
+      continue
+    }
+    const text = String(value).trim()
+    if (text) {
+      return text
+    }
+  }
+  return ''
+}
+
+function deriveTitleFromContent(content: string): string {
+  const firstLine = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || ''
+  if (!firstLine) {
+    return ''
+  }
+
+  const beforeTopic = firstLine.split('#')[0]?.trim() || ''
+  const fallback = firstLine
+    .replace(/#[^#\s]+(?:\[话题\])?/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return trimTitle(beforeTopic || fallback)
+}
+
+function trimTitle(title: string): string {
+  const normalized = title.replace(/\s+/g, ' ').trim()
+  return normalized.length > 40 ? `${normalized.slice(0, 40)}...` : normalized
+}
+
 function extractImages(note: unknown, maxImages: number): string[] {
-  const list = deepGet(note, ['imageList'])
+  const list = firstArray(
+    deepGet(note, ['imageList']),
+    deepGet(note, ['image_list']),
+    deepGet(note, ['images']),
+    deepGet(note, ['noteCard', 'imageList']),
+  )
   if (!Array.isArray(list)) {
     return []
   }
 
   const results: string[] = []
   for (const item of list) {
-    // Try original URL first (has full path with date/hash which might work better)
-    const originalUrl = String(deepGet(item, ['urlDefault']) || deepGet(item, ['url']) || '')
-    if (!originalUrl) {
-      continue
-    }
+    for (const originalUrl of collectImageUrls(item)) {
+      const formattedOriginal = formatUrl(originalUrl)
+      if (formattedOriginal.startsWith('http')) {
+        results.push(formattedOriginal)
+        continue
+      }
 
-    // Use original URL format (may include date/hash path and quality suffix)
-    const formattedOriginal = formatUrl(originalUrl)
-    if (formattedOriginal.startsWith('http')) {
-      results.push(formattedOriginal)
-      continue
-    }
-
-    // Fallback: extract token and construct CDN URL
-    const token = getImageToken(originalUrl)
-    if (token) {
-      results.push(`https://sns-img-bd.xhscdn.com/${token}`)
+      const token = getImageToken(originalUrl)
+      if (token) {
+        results.push(`https://sns-img-bd.xhscdn.com/${token}`)
+      }
     }
   }
 
   return dedupe(results).slice(0, maxImages)
+}
+
+function collectImageUrls(item: unknown): string[] {
+  const urls = [
+    deepGet(item, ['urlDefault']),
+    deepGet(item, ['url_default']),
+    deepGet(item, ['urlPre']),
+    deepGet(item, ['url_pre']),
+    deepGet(item, ['url']),
+  ]
+
+  const infoList = deepGet(item, ['infoList'])
+  if (Array.isArray(infoList)) {
+    for (const info of infoList) {
+      urls.push(deepGet(info, ['url']))
+    }
+  }
+
+  return dedupe(urls.map((url) => firstString(url)).filter(Boolean))
 }
 
 function getImageToken(url: string): string {
@@ -567,61 +647,82 @@ function getImageToken(url: string): string {
 }
 
 function extractVideos(note: unknown): string[] {
-  // Primary: use originVideoKey
-  const key = String(deepGet(note, ['video', 'consumer', 'originVideoKey']) || '')
+  const results: string[] = []
+  const streams = collectVideoStreams(note)
+  streams.sort((a: any, b: any) => compareVideoQuality(b, a))
+
+  for (const stream of streams) {
+    results.push(...collectVideoUrlsFromStream(stream))
+  }
+
+  const key = firstString(
+    deepGet(note, ['video', 'consumer', 'originVideoKey']),
+    deepGet(note, ['video', 'originVideoKey']),
+  )
   if (key) {
-    return [`https://sns-video-bd.xhscdn.com/${key}`]
+    results.push(key.startsWith('http') ? formatUrl(key) : `https://sns-video-bd.xhscdn.com/${key}`)
   }
 
-  // Fallback: extract from h264/h265 streams
-  const h264 = deepGet(note, ['video', 'media', 'stream', 'h264'])
-  const h265 = deepGet(note, ['video', 'media', 'stream', 'h265'])
-  const streams = [
-    ...(Array.isArray(h264) ? h264 : []),
-    ...(Array.isArray(h265) ? h265 : []),
-  ]
+  return dedupe(results.map((url) => formatUrl(url)).filter((url) => url.startsWith('http')))
+}
 
-  if (!streams.length) {
+function collectVideoStreams(note: unknown): unknown[] {
+  const stream = deepGet(note, ['video', 'media', 'stream']) || deepGet(note, ['video', 'stream'])
+  if (!stream || typeof stream !== 'object') {
     return []
   }
 
-  // Sort by quality (height first, then bitrate)
-  streams.sort((a: any, b: any) => {
-    const ah = Number(a.height || 0)
-    const bh = Number(b.height || 0)
-    if (ah !== bh) {
-      return ah - bh
+  const streams: unknown[] = []
+  for (const value of Object.values(stream as Record<string, unknown>)) {
+    if (Array.isArray(value)) {
+      streams.push(...value)
+    } else if (value && typeof value === 'object') {
+      streams.push(value)
     }
-    const ab = Number(a.videoBitrate || 0)
-    const bb = Number(b.videoBitrate || 0)
-    return ab - bb
-  })
-
-  const best = streams[streams.length - 1]
-  if (!best) {
-    return []
   }
+  return streams
+}
 
-  // Try backupUrls first, then masterUrl
-  const backups = deepGet(best, ['backupUrls'])
-  if (Array.isArray(backups) && backups[0]) {
-    return [formatUrl(String(backups[0]))]
+function collectVideoUrlsFromStream(stream: unknown): string[] {
+  const urls: unknown[] = []
+  const backups = deepGet(stream, ['backupUrls']) || deepGet(stream, ['backup_urls'])
+  if (Array.isArray(backups)) {
+    urls.push(...backups)
   }
+  urls.push(
+    deepGet(stream, ['masterUrl']),
+    deepGet(stream, ['master_url']),
+    deepGet(stream, ['url']),
+  )
+  return urls.map((url) => firstString(url)).filter(Boolean)
+}
 
-  const master = String(deepGet(best, ['masterUrl']) || '')
-  if (master) {
-    return [formatUrl(master)]
+function compareVideoQuality(a: any, b: any): number {
+  const ah = Number(a?.height || 0)
+  const bh = Number(b?.height || 0)
+  if (ah !== bh) {
+    return ah - bh
   }
-
-  return []
+  const ab = Number(a?.videoBitrate || a?.video_bitrate || 0)
+  const bb = Number(b?.videoBitrate || b?.video_bitrate || 0)
+  return ab - bb
 }
 
 function formatUrl(url: string): string {
-  return url.replace(/\\\//g, '/').replace(/&amp;/g, '&')
+  return url.replace(/\\u002f/gi, '/').replace(/\\\//g, '/').replace(/&amp;/g, '&').trim()
 }
 
 function dedupe(items: string[]): string[] {
-  return Array.from(new Set(items))
+  return Array.from(new Set(items.filter(Boolean)))
+}
+
+function firstArray(...values: unknown[]): unknown[] | null {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      return value
+    }
+  }
+  return null
 }
 
 function sleep(ms: number): Promise<void> {
@@ -639,20 +740,23 @@ function extractNoteId(url: string): string {
 }
 
 function extractAuthor(note: unknown): string | undefined {
-  const name = String(
-    deepGet(note, ['user', 'nickname'])
-    || deepGet(note, ['user', 'name'])
-    || deepGet(note, ['author', 'nickname'])
-    || ''
+  const name = firstString(
+    deepGet(note, ['user', 'nickname']),
+    deepGet(note, ['user', 'name']),
+    deepGet(note, ['author', 'nickname']),
+    deepGet(note, ['noteCard', 'user', 'nickname']),
   )
   return name || undefined
 }
 
 function extractNoteType(note: unknown): 'video' | 'image' | undefined {
-  const videoKey = deepGet(note, ['video', 'consumer', 'originVideoKey'])
-  const hasVideo = Boolean(videoKey || deepGet(note, ['video', 'media', 'stream']))
+  const hasVideo = extractVideos(note).length > 0
   if (hasVideo) return 'video'
-  const imageList = deepGet(note, ['imageList'])
+  const imageList = firstArray(
+    deepGet(note, ['imageList']),
+    deepGet(note, ['image_list']),
+    deepGet(note, ['images']),
+  )
   if (Array.isArray(imageList) && imageList.length > 0) return 'image'
   return undefined
 }
