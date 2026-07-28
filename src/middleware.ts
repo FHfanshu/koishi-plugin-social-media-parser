@@ -283,7 +283,7 @@ function normalizeUrlForDedup(url: string): string {
     const host = parsed.hostname.toLowerCase()
     const path = parsed.pathname.replace(/\/+$/, '')
 
-    if (host.endsWith('xiaohongshu.com') || host.endsWith('xhslink.com')) {
+    if (host.endsWith('xiaohongshu.com') || host.endsWith('xhslink.com') || host.endsWith('xhslink.cn')) {
       const noteMatch = path.match(/\/(?:discovery\/item|explore|item|note|notes|post|detail)\/([^/?#]+)/i)
       if (noteMatch?.[1]) {
         return `xhs:${noteMatch[1]}`

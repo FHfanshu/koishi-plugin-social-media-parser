@@ -22,7 +22,7 @@ const HTML_ENTITY_MAP: Record<string, string> = {
 }
 
 const DOUYIN_HOST_RE = /(^|\.)((v\.douyin\.com)|(www\.douyin\.com)|(www\.iesdouyin\.com))$/i
-const XIAOHONGSHU_HOST_RE = /(^|\.)((xiaohongshu\.com)|(xhslink\.com))$/i
+const XIAOHONGSHU_HOST_RE = /(^|\.)((xiaohongshu\.com)|(xhslink\.(?:com|cn)))$/i
 const BILIBILI_HOST_RE = /(^|\.)((bilibili\.com)|(b23\.tv)|(bili22\.cn)|(bili23\.cn)|(bili33\.cn)|(bili2233\.cn))$/i
 const TWITTER_HOST_RE = /(^|\.)((x\.com)|(twitter\.com)|(mobile\.x\.com)|(mobile\.twitter\.com)|(m\.twitter\.com)|(t\.co)|(fxtwitter\.com)|(vxtwitter\.com))$/i
 
@@ -472,6 +472,8 @@ function normalizeKnownSharePath(parsed: URL): void {
     || hostname.endsWith('.b23.tv')
     || hostname === 'xhslink.com'
     || hostname.endsWith('.xhslink.com')
+    || hostname === 'xhslink.cn'
+    || hostname.endsWith('.xhslink.cn')
     || hostname === 'v.douyin.com'
 
   if (!isKnownShortHost) {

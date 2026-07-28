@@ -13,6 +13,7 @@
     "build": "rm -rf lib && tsc -p tsconfig.json && vite build",
     "build:server": "rm -rf lib && tsc -p tsconfig.json",
     "build:client": "vite build",
+    "test:xhs": "node scripts/verify-xhs-regressions.cjs",
     "watch": "tsc -p tsconfig.json --watch"
   },
   "keywords": [

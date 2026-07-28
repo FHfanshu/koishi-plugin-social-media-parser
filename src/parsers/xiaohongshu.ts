@@ -133,7 +133,7 @@ export async function parseXiaohongshu(
   }
 }
 
-function toCanonicalXiaohongshuUrl(input: string): string {
+export function toCanonicalXiaohongshuUrl(input: string): string {
   try {
     // Clean corrupted URL from QQ share (e.g., xhsshare=QQ%22,%22preview%22:...)
     let cleanInput = input
@@ -142,14 +142,15 @@ function toCanonicalXiaohongshuUrl(input: string): string {
       cleanInput = cleanInput.slice(0, corruptedIdx)
     }
 
-    const url = new URL(cleanInput)
+    const url = unwrapCaptchaRedirect(new URL(cleanInput))
     const match = url.pathname.match(/\/(?:discovery\/item|explore|item|note)\/([0-9a-zA-Z]+)/)
-    if (!match?.[1]) {
+    const noteId = match?.[1] || url.searchParams.get('target_note_id') || ''
+    if (!noteId) {
       return cleanInput
     }
 
     const token = url.searchParams.get('xsec_token') || ''
-    const canonical = new URL(`https://www.xiaohongshu.com/discovery/item/${match[1]}`)
+    const canonical = new URL(`https://www.xiaohongshu.com/discovery/item/${noteId}`)
     if (token) {
       canonical.searchParams.set('xsec_token', token)
       canonical.searchParams.set('xsec_source', 'pc_user')
@@ -157,6 +158,23 @@ function toCanonicalXiaohongshuUrl(input: string): string {
     return canonical.toString()
   } catch {
     return input
+  }
+}
+
+function unwrapCaptchaRedirect(url: URL): URL {
+  if (!/(^|\.)xiaohongshu\.com$/i.test(url.hostname) || url.pathname !== '/website-login/captcha') {
+    return url
+  }
+
+  const redirectPath = url.searchParams.get('redirectPath')
+  if (!redirectPath) {
+    return url
+  }
+
+  try {
+    return new URL(redirectPath, 'https://www.xiaohongshu.com')
+  } catch {
+    return url
   }
 }
 

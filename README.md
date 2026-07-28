@@ -33,7 +33,7 @@ npm install koishi-plugin-social-media-parser
 | 平台 | 支持的域名 |
 |------|-----------|
 | 抖音 | `v.douyin.com` / `www.douyin.com` / `www.iesdouyin.com` |
-| 小红书 | `xiaohongshu.com` / `xhslink.com` |
+| 小红书 | `xiaohongshu.com` / `xhslink.com` / `xhslink.cn` |
 | 哔哩哔哩 | `bilibili.com` / `b23.tv` / `bili22.cn` / `bili23.cn` / `bili33.cn` / `bili2233.cn` |
 | Twitter/X | `x.com` / `twitter.com` / `t.co` / `fxtwitter.com` / `vxtwitter.com` |
 
