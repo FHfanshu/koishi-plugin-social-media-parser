@@ -130,8 +130,78 @@ export function createWbiCache(): WbiMixinCache {
 // Default module-level cache for backward compatibility (single-instance scenarios)
 const DEFAULT_WBI_CACHE: WbiMixinCache = createWbiCache()
 
+// Symbol key for storing per-instance buvid3 in Context
+const BUVID3_KEY = Symbol('social-media-parser:bilibili-buvid3')
+
+/**
+ * Get or create a random buvid3 cookie for the given context.
+ * B站风控会对无 buvid3 Cookie 的裸请求间歇性返回 412 (Precondition Failed)，
+ * 社区通用修复是给所有 api.bilibili.com 请求附带一个随机 buvid3。
+ */
+function getBuvid3(ctx: Context): string {
+  const ctxWithCache = ctx as Context & { [BUVID3_KEY]?: string }
+  if (!ctxWithCache[BUVID3_KEY]) {
+    ctxWithCache[BUVID3_KEY] = `${crypto.randomUUID().toUpperCase()}infoc`
+  }
+  return ctxWithCache[BUVID3_KEY]
+}
+
 // Symbol key for storing cache in Context
 const WBI_CACHE_KEY = Symbol('social-media-parser:bilibili-wbi-cache')
+
+// Symbol key for caching video page HTML (short TTL, avoids duplicate fetches)
+const PAGE_HTML_KEY = Symbol('social-media-parser:bilibili-page-html')
+
+interface PageHtmlCache {
+  key: string
+  html: string
+  expiresAt: number
+}
+
+/**
+ * Fetch the video page HTML with a short per-instance cache.
+ * API (api.bilibili.com) 被风控 412 时，视频页 HTML 是不同特征的端点，通常仍可访问。
+ */
+async function fetchVideoPageHtml(
+  ctx: Context,
+  bvid: string,
+  config: Config,
+  logger: Logger
+): Promise<string> {
+  const ctxWithCache = ctx as Context & { [PAGE_HTML_KEY]?: PageHtmlCache }
+  const cached = ctxWithCache[PAGE_HTML_KEY]
+  if (cached && cached.key === bvid && Date.now() < cached.expiresAt) {
+    return cached.html
+  }
+
+  const html = await withRetry(
+    () => requestText(ctx, `https://www.bilibili.com/video/${encodeURIComponent(bvid)}/`, config.network.timeoutMs, {
+      'user-agent': BILIBILI_UA,
+      'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      referer: 'https://www.bilibili.com/',
+      cookie: `buvid3=${getBuvid3(ctx)}`,
+    }),
+    {
+      maxRetries: 1,
+      baseDelayMs: 1500,
+      shouldRetry: (err) => {
+        const msg = err.message.toLowerCase()
+        return msg.includes('precondition failed') || msg.includes('412')
+          || msg.includes('network') || msg.includes('timeout')
+      },
+      onRetry: (attempt, err) => {
+        logger.info(`bilibili video page retry ${attempt}: ${err.message}`)
+      },
+    }
+  )
+
+  if (!html || !html.includes('__INITIAL_STATE__')) {
+    throw new Error('video page html unavailable')
+  }
+
+  ctxWithCache[PAGE_HTML_KEY] = { key: bvid, html, expiresAt: Date.now() + 60 * 1000 }
+  return html
+}
 
 /**
  * Get or create WBI cache for a given context.
@@ -156,14 +226,18 @@ export async function parseBilibili(
     throw new Error('该类型链接解析已禁用。')
   }
 
-  const finalUrl = await resolveRedirect(ctx, inputUrl, config.network.timeoutMs, logger)
+  // URL 中已带 BV/av 号时跳过重定向解析：该请求是最裸的探测请求（无 Cookie/重试），
+  // 风控窗口期最先被 412，且对直链而言解析结果与输入相同
+  const directId = extractVideoId(inputUrl)
+  const finalUrl = directId
+    ? inputUrl
+    : await resolveRedirect(ctx, inputUrl, config.network.timeoutMs, logger)
 
   // 跳过重定向后的非视频链接
   if (isBilibiliNonVideoUrl(finalUrl)) {
     throw new Error('该类型链接解析已禁用。')
   }
 
-  const directId = extractVideoId(inputUrl)
   const videoId = directId || extractVideoId(finalUrl)
   const page = extractPageNo(finalUrl) || extractPageNo(inputUrl) || 1
 
@@ -257,20 +331,29 @@ async function fetchVideoDetail(
     : `aid=${encodeURIComponent(videoId.value)}`
   const endpoint = `https://api.bilibili.com/x/web-interface/view?${query}`
 
-  const payload = await withRetry(
-    () => requestJson(ctx, endpoint, config.network.timeoutMs, logger),
-    {
-      maxRetries: 2,
-      baseDelayMs: 1000,
-      shouldRetry: (err) => {
-        const msg = err.message.toLowerCase()
-        return msg.includes('network') || msg.includes('timeout') || msg.includes('empty')
-      },
-      onRetry: (attempt, err) => {
-        logger.info(`bilibili video detail retry ${attempt}: ${err.message}`)
-      },
-    }
-  )
+  let payload: any = null
+  try {
+    payload = await withRetry(
+      () => requestJson(ctx, endpoint, config.network.timeoutMs, logger),
+      {
+        maxRetries: 2,
+        baseDelayMs: 1000,
+        shouldRetry: (err) => {
+          const msg = err.message.toLowerCase()
+          // 412 (Precondition Failed) 是 B站风控的间歇性拦截，重试常可恢复
+          return msg.includes('network') || msg.includes('timeout') || msg.includes('empty')
+            || msg.includes('precondition failed') || msg.includes('412')
+        },
+        onRetry: (attempt, err) => {
+          logger.info(`bilibili video detail retry ${attempt}: ${err.message}`)
+        },
+      }
+    )
+  } catch (err) {
+    // API 被风控/不可达时回退视频页 HTML 提取元数据
+    logger.info(`bilibili video detail api failed: ${(err as Error)?.message}, fallback to page html`)
+    return fetchVideoDetailViaPage(ctx, videoId, page, config, logger)
+  }
 
   const code = toNumber(payload?.code)
   if (code === -404 || code === 404) {
@@ -317,6 +400,69 @@ async function fetchVideoDetail(
   }
 }
 
+async function fetchVideoDetailViaPage(
+  ctx: Context,
+  videoId: BilibiliVideoId,
+  page: number,
+  config: Config,
+  logger: Logger
+): Promise<BilibiliVideoDetail> {
+  if (videoId.type !== 'bv') {
+    throw new Error('bilibili page fallback requires bvid')
+  }
+
+  const html = await fetchVideoPageHtml(ctx, normalizeBvid(videoId.value), config, logger)
+  const match = html.match(/__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});?\s*\(function|__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/)
+  const rawState = match?.[1] || match?.[2]
+  if (!rawState) {
+    throw new Error('bilibili page state not found')
+  }
+
+  let videoData: any
+  try {
+    videoData = JSON.parse(rawState)?.videoData
+  } catch {
+    throw new Error('bilibili page state parse failed')
+  }
+  if (!videoData || typeof videoData !== 'object') {
+    throw new Error('bilibili page state has no videoData')
+  }
+
+  const pages = Array.isArray(videoData.pages) ? videoData.pages : []
+  const picked = pages[page - 1] || pages[0]
+
+  const bvid = normalizeBvid(videoData?.bvid) || normalizeBvid(videoId.value)
+  const aid = normalizeAid(videoData?.aid)
+  const cid = normalizeCid(videoData?.cid || picked?.cid)
+
+  if (!bvid || !cid) {
+    throw new Error('bilibili page state incomplete')
+  }
+
+  logger.info(`bilibili video detail via page html ok: ${bvid}`)
+
+  return {
+    title: asString(videoData?.title).trim() || `bilibili:${bvid}`,
+    description: asString(videoData?.desc).trim(),
+    owner: asString(videoData?.owner?.name).trim(),
+    cover: normalizeResourceUrl(asString(videoData?.pic)),
+    bvid,
+    aid,
+    cid,
+    durationSec: toNumber(picked?.duration || videoData?.duration),
+    page,
+    stats: {
+      view: toNumber(videoData?.stat?.view),
+      like: toNumber(videoData?.stat?.like),
+      coin: toNumber(videoData?.stat?.coin),
+      favorite: toNumber(videoData?.stat?.favorite),
+      share: toNumber(videoData?.stat?.share),
+      danmaku: toNumber(videoData?.stat?.danmaku),
+      comment: toNumber(videoData?.stat?.reply),
+    },
+  }
+}
+
 async function fetchPlayInfoViaOfficialApi(
   ctx: Context,
   detail: BilibiliVideoDetail,
@@ -353,6 +499,39 @@ async function fetchPlayInfoViaOfficialApi(
     return extractPlayInfoFromData(payload.data, qn)
   } catch (err) {
     logger.debug(`bilibili old playurl request failed: ${(err as Error)?.message}`)
+  }
+
+  // 回退：从视频页 window.__playinfo__ 提取 DASH 直链
+  try {
+    const html = await fetchVideoPageHtml(ctx, detail.bvid, config, logger)
+    const pagePlayInfo = extractPlayInfoFromPageHtml(html, qn)
+    if (pagePlayInfo) {
+      logger.info(`bilibili play info via page html ok: ${detail.bvid}`)
+      return pagePlayInfo
+    }
+  } catch (err) {
+    logger.debug(`bilibili page playinfo failed: ${(err as Error)?.message}`)
+  }
+
+  return null
+}
+
+function extractPlayInfoFromPageHtml(html: string, qn: number): BilibiliPlayInfo | null {
+  const match = html.match(/window\.__playinfo__\s*=\s*(\{[\s\S]*?\})\s*<\/script>/)
+  if (!match) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(match[1])
+    if (parsed?.dash) {
+      return extractPlayInfoFromData({ dash: parsed.dash }, qn)
+    }
+    if (parsed?.durl) {
+      return extractPlayInfoFromData({ durl: parsed.durl }, qn)
+    }
+    return null
+  } catch {
     return null
   }
 }
@@ -892,6 +1071,7 @@ async function requestJson(
     referer: 'https://www.bilibili.com/',
     accept: 'application/json,text/plain,*/*',
     'user-agent': BILIBILI_UA,
+    cookie: `buvid3=${getBuvid3(ctx)}`,
   })
 
   if (!text || typeof text !== 'string') {
